@@ -17,3 +17,4 @@ docs/build
 docs/_build
 build
 test-observed
+@command_history.txt
