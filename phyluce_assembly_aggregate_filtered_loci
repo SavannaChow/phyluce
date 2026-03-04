@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import sqlite3
+from collections import defaultdict
+from pathlib import Path
+
+
+LOCI_FIELDS = [
+    "sample_id",
+    "uce_locus",
+    "target_name",
+    "target_start",
+    "target_end",
+    "strand",
+    "probe_hit_count",
+    "query_names",
+    "filtered_loci_path",
+]
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Aggregate many *.filtered.loci.tsv files into a single SQLite database "
+            "plus summary TSV tables."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        default=os.getcwd(),
+        help="Directory to recursively scan for *.filtered.loci.tsv files.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for aggregate outputs. Defaults to <input-dir>/07_Aggregated_loci.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default="all_samples",
+        help="Filename prefix for aggregate outputs.",
+    )
+    return parser.parse_args()
+
+
+def infer_sample_id(path):
+    parent = path.parent.name
+    if parent:
+        return parent
+    stem = path.name
+    suffix = ".filtered.loci.tsv"
+    if stem.endswith(suffix):
+        return stem[: -len(suffix)]
+    return path.stem
+
+
+def find_loci_files(input_dir):
+    root = Path(input_dir).resolve()
+    files = sorted(root.rglob("*.filtered.loci.tsv"))
+    if not files:
+        raise RuntimeError("No *.filtered.loci.tsv files found under {}".format(root))
+    return files
+
+
+def read_loci_files(paths):
+    rows = []
+    duplicates = []
+    seen = set()
+    for path in paths:
+        sample_id = infer_sample_id(path)
+        with open(path, newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            required = {
+                "UCE locus",
+                "Target name",
+                "Target start",
+                "Target end",
+                "Strand",
+                "Probe hit count",
+                "Query names",
+            }
+            if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+                raise RuntimeError("Unexpected loci schema in {}".format(path))
+            for line_number, row in enumerate(reader, start=2):
+                record = {
+                    "sample_id": sample_id,
+                    "uce_locus": row["UCE locus"].strip(),
+                    "target_name": row["Target name"].strip(),
+                    "target_start": int(row["Target start"]),
+                    "target_end": int(row["Target end"]),
+                    "strand": row["Strand"].strip() or ".",
+                    "probe_hit_count": int(row["Probe hit count"]),
+                    "query_names": row["Query names"].strip(),
+                    "filtered_loci_path": str(path),
+                }
+                key = (record["sample_id"], record["uce_locus"])
+                if key in seen:
+                    duplicates.append(
+                        "{} line {} duplicates sample/locus pair {}".format(
+                            path, line_number, key
+                        )
+                    )
+                else:
+                    seen.add(key)
+                rows.append(record)
+    if duplicates:
+        raise RuntimeError(
+            "Duplicate (sample_id, uce_locus) pairs detected:\n{}".format(
+                "\n".join(duplicates[:20])
+            )
+        )
+    return rows
+
+
+def ensure_output_dir(input_dir, output_dir):
+    if output_dir:
+        path = Path(output_dir).resolve()
+    else:
+        path = Path(input_dir).resolve() / "07_Aggregated_loci"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def write_long_table(path, rows):
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LOCI_FIELDS, delimiter="\t")
+        writer.writeheader()
+        for row in sorted(rows, key=lambda r: (r["uce_locus"], r["sample_id"])):
+            writer.writerow(row)
+
+
+def write_sqlite(path, rows):
+    conn = sqlite3.connect(path)
+    try:
+        cur = conn.cursor()
+        cur.execute("DROP TABLE IF EXISTS loci")
+        cur.execute(
+            """
+            CREATE TABLE loci (
+                sample_id TEXT NOT NULL,
+                uce_locus TEXT NOT NULL,
+                target_name TEXT NOT NULL,
+                target_start INTEGER NOT NULL,
+                target_end INTEGER NOT NULL,
+                strand TEXT NOT NULL,
+                probe_hit_count INTEGER NOT NULL,
+                query_names TEXT NOT NULL,
+                filtered_loci_path TEXT NOT NULL,
+                PRIMARY KEY (sample_id, uce_locus)
+            )
+            """
+        )
+        cur.executemany(
+            """
+            INSERT INTO loci (
+                sample_id, uce_locus, target_name, target_start, target_end,
+                strand, probe_hit_count, query_names, filtered_loci_path
+            ) VALUES (
+                :sample_id, :uce_locus, :target_name, :target_start, :target_end,
+                :strand, :probe_hit_count, :query_names, :filtered_loci_path
+            )
+            """,
+            rows,
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_loci_uce ON loci (uce_locus)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_loci_sample ON loci (sample_id)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def build_presence(rows):
+    samples = sorted({row["sample_id"] for row in rows})
+    loci = sorted({row["uce_locus"] for row in rows})
+    by_pair = {(row["uce_locus"], row["sample_id"]): row for row in rows}
+    return loci, samples, by_pair
+
+
+def write_presence_matrix(path, loci, samples, by_pair):
+    fieldnames = ["uce_locus"] + samples
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for locus in loci:
+            row = {"uce_locus": locus}
+            for sample in samples:
+                row[sample] = "1" if (locus, sample) in by_pair else "0"
+            writer.writerow(row)
+
+
+def write_target_matrix(path, loci, samples, by_pair):
+    fieldnames = ["uce_locus"] + samples
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for locus in loci:
+            row = {"uce_locus": locus}
+            for sample in samples:
+                record = by_pair.get((locus, sample))
+                row[sample] = record["target_name"] if record else ""
+            writer.writerow(row)
+
+
+def write_locus_summary(path, loci, samples, by_pair):
+    fieldnames = [
+        "uce_locus",
+        "samples_with_sequence",
+        "samples_missing",
+        "sample_ids_present",
+        "sample_ids_missing",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for locus in loci:
+            present = [sample for sample in samples if (locus, sample) in by_pair]
+            missing = [sample for sample in samples if (locus, sample) not in by_pair]
+            writer.writerow(
+                {
+                    "uce_locus": locus,
+                    "samples_with_sequence": len(present),
+                    "samples_missing": len(missing),
+                    "sample_ids_present": ",".join(present),
+                    "sample_ids_missing": ",".join(missing),
+                }
+            )
+
+
+def write_sample_summary(path, samples, loci, by_pair):
+    fieldnames = [
+        "sample_id",
+        "loci_with_sequence",
+        "loci_missing",
+        "proportion_present",
+    ]
+    total = float(len(loci)) if loci else 0.0
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for sample in samples:
+            present = sum(1 for locus in loci if (locus, sample) in by_pair)
+            missing = len(loci) - present
+            writer.writerow(
+                {
+                    "sample_id": sample,
+                    "loci_with_sequence": present,
+                    "loci_missing": missing,
+                    "proportion_present": "{:.4f}".format(present / total if total else 0.0),
+                }
+            )
+
+
+def main():
+    args = get_args()
+    input_dir = Path(args.input_dir).resolve()
+    output_dir = ensure_output_dir(input_dir, args.output_dir)
+    paths = find_loci_files(input_dir)
+    rows = read_loci_files(paths)
+    loci, samples, by_pair = build_presence(rows)
+
+    outputs = {
+        "sqlite": output_dir / "{}.uce.sqlite".format(args.prefix),
+        "long": output_dir / "{}.filtered.loci.tsv".format(args.prefix),
+        "presence": output_dir / "{}.presence_absence.tsv".format(args.prefix),
+        "target": output_dir / "{}.target_matrix.tsv".format(args.prefix),
+        "locus_summary": output_dir / "{}.locus_summary.tsv".format(args.prefix),
+        "sample_summary": output_dir / "{}.sample_summary.tsv".format(args.prefix),
+    }
+
+    write_sqlite(outputs["sqlite"], rows)
+    write_long_table(outputs["long"], rows)
+    write_presence_matrix(outputs["presence"], loci, samples, by_pair)
+    write_target_matrix(outputs["target"], loci, samples, by_pair)
+    write_locus_summary(outputs["locus_summary"], loci, samples, by_pair)
+    write_sample_summary(outputs["sample_summary"], samples, loci, by_pair)
+
+    print("Aggregated {} loci records from {} samples.".format(len(rows), len(samples)))
+    for name, path in outputs.items():
+        print("{}\t{}".format(name, path))
+
+
+if __name__ == "__main__":
+    main()

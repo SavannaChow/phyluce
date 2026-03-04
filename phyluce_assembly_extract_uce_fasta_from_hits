@@ -1,0 +1,464 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Extract UCE sequences from a contigs FASTA using coordinates from "
+            "phyluce_assembly_filter_uce_hits output."
+        )
+    )
+    parser.add_argument(
+        "--hits",
+        required=True,
+        help="Filtered hits table (.tsv) from phyluce_assembly_filter_uce_hits.",
+    )
+    parser.add_argument(
+        "--contigs",
+        required=True,
+        help="FASTA file containing the contig sequences referenced by Target name.",
+    )
+    parser.add_argument(
+        "--sample-prefix",
+        required=True,
+        help=(
+            "Sample prefix to include in FASTA headers and simplified sequence names."
+        ),
+    )
+    parser.add_argument(
+        "--filename-prefix",
+        required=True,
+        help="Prefix to use for output filenames.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory. Defaults to the hits file directory.",
+    )
+    parser.add_argument(
+        "--regex",
+        default=r"^(.+?)(?:_p\d+.*)$",
+        help="Regex used to convert Query name to the parent UCE locus when needed.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["full-contig", "slice"],
+        default="full-contig",
+        help=(
+            "Extraction mode. 'full-contig' matches original phyluce behavior and "
+            "writes the entire matched contig. 'slice' extracts only the matched "
+            "interval, optionally extended by --flank."
+        ),
+    )
+    parser.add_argument(
+        "--flank",
+        type=int,
+        default=0,
+        help=(
+            "Number of bases to add on each side when using --mode slice."
+        ),
+    )
+    parser.add_argument(
+        "--reverse-complement-negative",
+        action="store_true",
+        default=False,
+        help=(
+            "Reverse-complement extracted sequences when the inferred locus strand is '-'."
+        ),
+    )
+    return parser.parse_args()
+
+
+def derive_output_paths(hits_path, filename_prefix, output_dir=None):
+    hits_abs = os.path.abspath(hits_path)
+    directory = output_dir if output_dir else os.path.dirname(hits_abs)
+    return {
+        "detailed_fasta": os.path.join(directory, "{}.fasta".format(filename_prefix)),
+        "simple_fasta": os.path.join(directory, "{}.simple.fasta".format(filename_prefix)),
+        "name_map": os.path.join(directory, "{}.name_map.tsv".format(filename_prefix)),
+    }
+
+
+def detect_schema(fieldnames):
+    locus_schema = {
+        "UCE locus",
+        "Target name",
+        "Target start",
+        "Target end",
+    }
+    raw_schema = {
+        "Query name",
+        "Target name",
+        "Target start",
+        "Target end",
+    }
+    names = set(fieldnames)
+    if locus_schema.issubset(names):
+        return "locus"
+    if raw_schema.issubset(names):
+        return "raw"
+    raise ValueError(
+        "Unsupported hits table. Expected either locus columns {} or raw columns {}.".format(
+            sorted(locus_schema), sorted(raw_schema)
+        )
+    )
+
+
+def normalize_interval(start, end):
+    left = int(start)
+    right = int(end)
+    return min(left, right), max(left, right)
+
+
+def merge_intervals(intervals):
+    if not intervals:
+        return []
+    merged = []
+    for start, end in sorted(intervals):
+        if not merged or start >= merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [tuple(item) for item in merged]
+
+
+def load_loci(hits_path, regex):
+    with open(hits_path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None:
+            raise ValueError("Input hits table is empty: {}".format(hits_path))
+        schema = detect_schema(reader.fieldnames)
+        if schema == "locus":
+            return load_locus_rows(reader)
+        return load_raw_rows(reader, regex)
+
+
+def load_locus_rows(reader):
+    loci = []
+    for line_number, row in enumerate(reader, start=2):
+        row = {key: value.strip() for key, value in row.items()}
+        start, end = normalize_interval(row["Target start"], row["Target end"])
+        query_names = [
+            item.strip() for item in row.get("Query names", "").split(",") if item.strip()
+        ]
+        loci.append(
+            {
+                "uce_locus": row["UCE locus"],
+                "target_name": row["Target name"],
+                "target_start": start,
+                "target_end": end,
+                "query_names": query_names,
+                "probe_hit_count": int(row.get("Probe hit count") or len(query_names) or 1),
+                "strand": row.get("Strand", ".").strip() or ".",
+                "source_line_numbers": [line_number],
+            }
+        )
+    return loci
+
+
+def infer_strand_from_names(strands):
+    if not strands:
+        return "."
+    counts = Counter(strands)
+    return counts.most_common(1)[0][0]
+
+
+def load_raw_rows(reader, regex):
+    grouped = defaultdict(list)
+    for line_number, row in enumerate(reader, start=2):
+        row = {key: value.strip() for key, value in row.items()}
+        match = regex.search(row["Query name"])
+        if not match:
+            raise ValueError(
+                "Line {}: could not extract UCE locus from {!r}".format(
+                    line_number, row["Query name"]
+                )
+            )
+        start, end = normalize_interval(row["Target start"], row["Target end"])
+        key = (match.group(1), row["Target name"])
+        grouped[key].append(
+            {
+                "query_name": row["Query name"],
+                "relative_strand": row.get("Relative strand", ""),
+                "target_start": start,
+                "target_end": end,
+                "line_number": line_number,
+            }
+        )
+
+    loci = []
+    for (uce_locus, target_name), hits in sorted(grouped.items()):
+        merged = merge_intervals(
+            [(hit["target_start"], hit["target_end"]) for hit in hits]
+        )
+        loci.append(
+            {
+                "uce_locus": uce_locus,
+                "target_name": target_name,
+                "target_start": min(start for start, _ in merged),
+                "target_end": max(end for _, end in merged),
+                "query_names": [hit["query_name"] for hit in sorted(hits, key=lambda x: x["line_number"])],
+                "probe_hit_count": len(hits),
+                "strand": infer_strand_from_names(
+                    [hit["relative_strand"] for hit in hits if hit["relative_strand"]]
+                ),
+                "source_line_numbers": [hit["line_number"] for hit in hits],
+            }
+        )
+    return loci
+
+
+def build_record_id(sample_name, locus):
+    parts = [
+        sample_name,
+        locus["uce_locus"],
+        locus["target_name"],
+        "{}-{}".format(locus["target_start"], locus["target_end"]),
+    ]
+    if locus["strand"] != ".":
+        parts.append("strand={}".format(locus["strand"]))
+    parts.append("hits={}".format(locus["probe_hit_count"]))
+    return "|".join(parts)
+
+
+def build_record_description(locus):
+    query_names = ",".join(locus["query_names"]) if locus["query_names"] else "."
+    source_lines = ",".join(str(i) for i in locus["source_line_numbers"])
+    return (
+        "uce_locus={uce} contig={contig} coords={start}-{end} strand={strand} "
+        "extract={extract_start}-{extract_end} mode={mode} flank={flank} "
+        "probe_hits={hits} source_queries={queries} source_lines={lines}"
+    ).format(
+        uce=locus["uce_locus"],
+        contig=locus["target_name"],
+        start=locus["target_start"],
+        end=locus["target_end"],
+        strand=locus["strand"],
+        extract_start=locus.get("extract_start", locus["target_start"]),
+        extract_end=locus.get("extract_end", locus["target_end"]),
+        mode=locus.get("extract_mode", "slice"),
+        flank=locus.get("flank", 0),
+        hits=locus["probe_hit_count"],
+        queries=query_names,
+        lines=source_lines,
+    )
+
+
+def wrap_fasta(sequence, width=80):
+    return str(sequence)
+
+
+def reverse_complement(sequence):
+    table = str.maketrans("ACGTRYMKBDHVacgtrymkbdhvNn", "TGCAYRKMVHDBtgcayrkmvhd bNn".replace(" ", ""))
+    return sequence.translate(table)[::-1]
+
+
+def sanitize_name(text):
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", text)
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned or "uce"
+
+
+def get_extraction_bounds(locus, contig_length, mode, flank):
+    if mode == "full-contig":
+        return 0, contig_length
+    start = max(0, locus["target_start"] - flank)
+    end = min(contig_length, locus["target_end"] + flank)
+    return start, end
+
+
+def load_contigs(contigs_path):
+    contigs = {}
+    current_id = None
+    chunks = []
+    with open(contigs_path) as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current_id is not None:
+                    contigs[current_id] = "".join(chunks)
+                current_id = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+    if current_id is not None:
+        contigs[current_id] = "".join(chunks)
+    return contigs
+
+
+def extract_records(
+    loci,
+    contigs_path,
+    sample_name,
+    reverse_complement_negative,
+    mode,
+    flank,
+):
+    records = []
+    missing = []
+    contigs = load_contigs(contigs_path)
+    for locus in loci:
+        contig_name = locus["target_name"]
+        if contig_name not in contigs:
+            missing.append(contig_name)
+            continue
+        contig_sequence = contigs[contig_name]
+        start, end = get_extraction_bounds(
+            locus, len(contig_sequence), mode, flank
+        )
+        if end > len(contig_sequence):
+            raise ValueError(
+                "Requested interval {}:{}-{} exceeds contig length {}".format(
+                    contig_name, start, end, len(contig_sequence)
+                )
+            )
+        sequence = contig_sequence[start:end]
+        if reverse_complement_negative and locus["strand"] == "-":
+            sequence = reverse_complement(sequence)
+        output_locus = dict(locus)
+        output_locus.update(
+            {
+                "extract_start": start,
+                "extract_end": end,
+                "extract_mode": mode,
+                "flank": flank,
+            }
+        )
+        records.append(
+            {
+                "id": build_record_id(sample_name, output_locus),
+                "description": build_record_description(output_locus),
+                "sequence": sequence,
+                "uce_locus": output_locus["uce_locus"],
+                "target_name": output_locus["target_name"],
+                "target_start": output_locus["target_start"],
+                "target_end": output_locus["target_end"],
+                "extract_start": start,
+                "extract_end": end,
+                "extract_mode": mode,
+                "flank": flank,
+                "strand": output_locus["strand"],
+                "probe_hit_count": output_locus["probe_hit_count"],
+                "query_names": list(output_locus["query_names"]),
+            }
+        )
+    if missing:
+        missing_set = sorted(set(missing))
+        raise ValueError(
+            "The following Target name values were not found in the contigs FASTA: {}".format(
+                ", ".join(missing_set)
+            )
+        )
+    return records
+
+
+def assign_simple_names(records, sample_name):
+    used = set()
+    safe_sample = sanitize_name(sample_name)
+    for record in records:
+        base = "{}__{}".format(safe_sample, sanitize_name(record["uce_locus"]))
+        simple_name = base
+        counter = 2
+        while simple_name in used:
+            simple_name = "{}__{}".format(base, counter)
+            counter += 1
+        used.add(simple_name)
+        record["simple_id"] = simple_name
+
+
+def write_detailed_fasta(path, records):
+    with open(path, "w") as handle:
+        for record in records:
+            handle.write(">{} {}\n".format(record["id"], record["description"]))
+            handle.write("{}\n".format(wrap_fasta(record["sequence"])))
+
+
+def write_simple_fasta(path, records):
+    with open(path, "w") as handle:
+        for record in records:
+            handle.write(">{}\n".format(record["simple_id"]))
+            handle.write("{}\n".format(wrap_fasta(record["sequence"])))
+
+
+def write_name_map(path, records):
+    fieldnames = [
+        "simple_name",
+        "detailed_name",
+        "uce_locus",
+        "target_name",
+        "target_start",
+        "target_end",
+        "extract_start",
+        "extract_end",
+        "extract_mode",
+        "flank",
+        "strand",
+        "probe_hit_count",
+        "source_queries",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for record in records:
+            writer.writerow(
+                {
+                    "simple_name": record["simple_id"],
+                    "detailed_name": record["id"],
+                    "uce_locus": record["uce_locus"],
+                    "target_name": record["target_name"],
+                    "target_start": record["target_start"],
+                    "target_end": record["target_end"],
+                    "extract_start": record["extract_start"],
+                    "extract_end": record["extract_end"],
+                    "extract_mode": record["extract_mode"],
+                    "flank": record["flank"],
+                    "strand": record["strand"],
+                    "probe_hit_count": record["probe_hit_count"],
+                    "source_queries": ",".join(record["query_names"]) or ".",
+                }
+            )
+
+
+def main():
+    args = get_args()
+    regex = re.compile(args.regex)
+    sample_name = args.sample_prefix
+    output_paths = derive_output_paths(args.hits, args.filename_prefix, args.output_dir)
+    loci = load_loci(args.hits, regex)
+    os.makedirs(os.path.dirname(output_paths["detailed_fasta"]), exist_ok=True)
+    records = extract_records(
+        loci,
+        args.contigs,
+        sample_name,
+        args.reverse_complement_negative,
+        args.mode,
+        args.flank,
+    )
+    assign_simple_names(records, sample_name)
+    write_detailed_fasta(output_paths["detailed_fasta"], records)
+    write_simple_fasta(output_paths["simple_fasta"], records)
+    write_name_map(output_paths["name_map"], records)
+    sys.stderr.write(
+        "Extracted {} UCE sequences from {} loci into {}, {}, and {} using mode={} flank={}.\n".format(
+            len(records),
+            len(loci),
+            output_paths["detailed_fasta"],
+            output_paths["simple_fasta"],
+            output_paths["name_map"],
+            args.mode,
+            args.flank,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

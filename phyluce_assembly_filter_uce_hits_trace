@@ -1,0 +1,384 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+
+
+REQUIRED_COLUMNS = (
+    "Query name",
+    "Target name",
+    "Target start",
+    "Target end",
+)
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Filter a tab-delimited UCE hits table and emit a trace table showing "
+            "which rows were kept or removed, plus the reason for each decision."
+        )
+    )
+    parser.add_argument("--input", required=True, help="Path to the input UCE_hits.txt file.")
+    parser.add_argument("--output", required=True, help="Path for the filtered hit table.")
+    parser.add_argument(
+        "--trace-output",
+        required=True,
+        help="Path for the per-row trace table.",
+    )
+    parser.add_argument(
+        "--locus-output",
+        required=False,
+        help="Optional path for a collapsed table with one row per retained UCE-contig locus.",
+    )
+    parser.add_argument(
+        "--summary",
+        required=False,
+        help="Optional path for a plain-text filtering summary.",
+    )
+    parser.add_argument(
+        "--regex",
+        default=r"^(.+?)(?:_p\d+.*)$",
+        help="Regex used to convert Query name to the parent UCE locus. The first capture group is kept.",
+    )
+    return parser.parse_args()
+
+
+def parse_args_row(row, regex, line_number):
+    parsed = {key: value.strip() for key, value in row.items()}
+    match = regex.search(parsed["Query name"])
+    if not match:
+        raise ValueError(
+            "Line {}: could not extract a UCE locus from {!r} using regex {!r}".format(
+                line_number, parsed["Query name"], regex.pattern
+            )
+        )
+    start = int(parsed["Target start"])
+    end = int(parsed["Target end"])
+    parsed["_uce"] = match.group(1)
+    parsed["_target_start"] = min(start, end)
+    parsed["_target_end"] = max(start, end)
+    parsed["_line_number"] = line_number
+    return parsed
+
+
+def read_hits(path, regex):
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None:
+            raise ValueError("Input file is empty: {}".format(path))
+        missing = [name for name in REQUIRED_COLUMNS if name not in reader.fieldnames]
+        if missing:
+            raise ValueError(
+                "Input file is missing required columns: {}".format(", ".join(missing))
+            )
+        rows = [
+            parse_args_row(row, regex, line_number)
+            for line_number, row in enumerate(reader, start=2)
+        ]
+    return reader.fieldnames, rows
+
+
+def interval_overlap(left, right):
+    return max(left[0], right[0]) < min(left[1], right[1])
+
+
+def merge_intervals(intervals):
+    if not intervals:
+        return []
+    merged = []
+    for start, end in sorted(intervals):
+        if not merged or start >= merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [tuple(item) for item in merged]
+
+
+def infer_strand(rows):
+    strands = [
+        row.get("Relative strand", "").strip()
+        for row in rows
+        if row.get("Relative strand", "").strip()
+    ]
+    if not strands:
+        return "."
+    counts = Counter(strands)
+    return counts.most_common(1)[0][0]
+
+
+def build_groups(rows):
+    by_uce = defaultdict(set)
+    by_contig = defaultdict(lambda: defaultdict(list))
+    by_pair = defaultdict(list)
+    for row in rows:
+        uce = row["_uce"]
+        contig = row["Target name"]
+        by_uce[uce].add(contig)
+        by_contig[contig][uce].append(row)
+        by_pair[(uce, contig)].append(row)
+    return by_uce, by_contig, by_pair
+
+
+def find_multi_contig_uces(rows):
+    by_uce, _, _ = build_groups(rows)
+    bad_uces = {}
+    for uce, contigs in by_uce.items():
+        if len(contigs) > 1:
+            bad_uces[uce] = sorted(contigs)
+    return bad_uces
+
+
+def find_overlap_conflict_contigs(rows):
+    _, by_contig, _ = build_groups(rows)
+    bad_contigs = {}
+    for contig, loci in by_contig.items():
+        collapsed = {}
+        for uce, uce_rows in loci.items():
+            intervals = [(row["_target_start"], row["_target_end"]) for row in uce_rows]
+            collapsed[uce] = merge_intervals(intervals)
+        uces = sorted(collapsed)
+        pairs = set()
+        for idx, left_uce in enumerate(uces):
+            for right_uce in uces[idx + 1 :]:
+                overlaps = any(
+                    interval_overlap(left_interval, right_interval)
+                    for left_interval in collapsed[left_uce]
+                    for right_interval in collapsed[right_uce]
+                )
+                if overlaps:
+                    pairs.add((left_uce, right_uce))
+        if pairs:
+            bad_contigs[contig] = sorted(pairs)
+    return bad_contigs
+
+
+def initialize_trace(rows):
+    trace = {}
+    for row in rows:
+        trace[row["_line_number"]] = {
+            "status": "kept",
+            "removal_iteration": "",
+            "removal_scope": "",
+            "removal_reason": "",
+            "reason_details": "",
+        }
+    return trace
+
+
+def mark_removed_rows(active_rows, trace, iteration, scope, reason, details_by_key, key_name):
+    next_active = []
+    for row in active_rows:
+        key = row[key_name]
+        if key in details_by_key:
+            current = trace[row["_line_number"]]
+            if current["status"] != "removed":
+                current["status"] = "removed"
+                current["removal_iteration"] = str(iteration)
+                current["removal_scope"] = scope
+                current["removal_reason"] = reason
+                current["reason_details"] = details_by_key[key]
+        else:
+            next_active.append(row)
+    return next_active
+
+
+def iteratively_filter_hits(rows):
+    active = list(rows)
+    trace = initialize_trace(rows)
+    removed_uces = {}
+    removed_contigs = {}
+    iteration = 0
+    while True:
+        iteration += 1
+        changed = False
+
+        bad_uces = find_multi_contig_uces(active)
+        if bad_uces:
+            changed = True
+            for uce, contigs in bad_uces.items():
+                removed_uces[uce] = contigs
+            uce_details = {
+                uce: "uce={} matched_multiple_contigs={}".format(uce, ",".join(contigs))
+                for uce, contigs in bad_uces.items()
+            }
+            active = mark_removed_rows(
+                active,
+                trace,
+                iteration,
+                "uce",
+                "uce_matches_multiple_contigs",
+                uce_details,
+                "_uce",
+            )
+
+        bad_contigs = find_overlap_conflict_contigs(active)
+        if bad_contigs:
+            changed = True
+            for contig, pairs in bad_contigs.items():
+                removed_contigs[contig] = pairs
+            contig_details = {
+                contig: "contig={} overlapping_uce_pairs={}".format(
+                    contig,
+                    ",".join("{}~{}".format(left, right) for left, right in pairs),
+                )
+                for contig, pairs in bad_contigs.items()
+            }
+            active = mark_removed_rows(
+                active,
+                trace,
+                iteration,
+                "contig",
+                "contig_contains_overlapping_uces",
+                contig_details,
+                "Target name",
+            )
+
+        if not changed:
+            break
+
+    return active, trace, removed_uces, removed_contigs
+
+
+def write_hits(path, fieldnames, rows):
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row[field] for field in fieldnames})
+
+
+def write_locus_table(path, rows):
+    _, _, by_pair = build_groups(rows)
+    fieldnames = [
+        "UCE locus",
+        "Target name",
+        "Target start",
+        "Target end",
+        "Strand",
+        "Probe hit count",
+        "Query names",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for (uce, contig), pair_rows in sorted(by_pair.items()):
+            intervals = [(row["_target_start"], row["_target_end"]) for row in pair_rows]
+            merged = merge_intervals(intervals)
+            writer.writerow(
+                {
+                    "UCE locus": uce,
+                    "Target name": contig,
+                    "Target start": min(start for start, _ in merged),
+                    "Target end": max(end for _, end in merged),
+                    "Strand": infer_strand(pair_rows),
+                    "Probe hit count": len(pair_rows),
+                    "Query names": ",".join(
+                        row["Query name"]
+                        for row in sorted(pair_rows, key=lambda item: item["_line_number"])
+                    ),
+                }
+            )
+
+
+def write_trace(path, fieldnames, rows, trace):
+    trace_fields = list(fieldnames) + [
+        "UCE locus",
+        "Normalized target start",
+        "Normalized target end",
+        "Decision",
+        "Removal iteration",
+        "Removal scope",
+        "Removal reason",
+        "Reason details",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=trace_fields, delimiter="\t")
+        writer.writeheader()
+        for row in sorted(rows, key=lambda item: item["_line_number"]):
+            record = {field: row[field] for field in fieldnames}
+            decision = trace[row["_line_number"]]
+            record.update(
+                {
+                    "UCE locus": row["_uce"],
+                    "Normalized target start": row["_target_start"],
+                    "Normalized target end": row["_target_end"],
+                    "Decision": decision["status"],
+                    "Removal iteration": decision["removal_iteration"],
+                    "Removal scope": decision["removal_scope"],
+                    "Removal reason": decision["removal_reason"],
+                    "Reason details": decision["reason_details"],
+                }
+            )
+            writer.writerow(record)
+
+
+def write_summary(path, all_rows, kept_rows, removed_uces, removed_contigs):
+    all_uces = {row["_uce"] for row in all_rows}
+    all_contigs = {row["Target name"] for row in all_rows}
+    kept_uces = {row["_uce"] for row in kept_rows}
+    kept_contigs = {row["Target name"] for row in kept_rows}
+    kept_pairs = {(row["_uce"], row["Target name"]) for row in kept_rows}
+    with open(path, "w") as handle:
+        handle.write("Input rows:\t{}\n".format(len(all_rows)))
+        handle.write("Retained rows:\t{}\n".format(len(kept_rows)))
+        handle.write("Removed rows:\t{}\n".format(len(all_rows) - len(kept_rows)))
+        handle.write("Input UCE loci:\t{}\n".format(len(all_uces)))
+        handle.write("Retained UCE loci:\t{}\n".format(len(kept_uces)))
+        handle.write("Removed UCE loci (multi-contig):\t{}\n".format(len(removed_uces)))
+        handle.write("Input contigs:\t{}\n".format(len(all_contigs)))
+        handle.write("Retained contigs:\t{}\n".format(len(kept_contigs)))
+        handle.write(
+            "Removed contigs (overlapping multi-UCE):\t{}\n".format(len(removed_contigs))
+        )
+        handle.write("Retained UCE-contig loci:\t{}\n".format(len(kept_pairs)))
+        handle.write("\n[Removed UCE loci]\n")
+        for uce in sorted(removed_uces):
+            handle.write("{}\t{}\n".format(uce, ",".join(removed_uces[uce])))
+        handle.write("\n[Removed contigs]\n")
+        for contig in sorted(removed_contigs):
+            handle.write(
+                "{}\t{}\n".format(
+                    contig,
+                    ",".join(
+                        "{}~{}".format(left, right)
+                        for left, right in removed_contigs[contig]
+                    ),
+                )
+            )
+
+
+def main():
+    args = get_args()
+    regex = re.compile(args.regex)
+    fieldnames, rows = read_hits(args.input, regex)
+    kept_rows, trace, removed_uces, removed_contigs = iteratively_filter_hits(rows)
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    write_hits(args.output, fieldnames, sorted(kept_rows, key=lambda row: row["_line_number"]))
+    write_trace(args.trace_output, fieldnames, rows, trace)
+    if args.locus_output:
+        write_locus_table(
+            args.locus_output,
+            sorted(kept_rows, key=lambda row: row["_line_number"]),
+        )
+    if args.summary:
+        write_summary(
+            args.summary,
+            rows,
+            sorted(kept_rows, key=lambda row: row["_line_number"]),
+            removed_uces,
+            removed_contigs,
+        )
+    sys.stderr.write(
+        "Retained {} of {} rows; removed {} multi-contig UCE loci and {} overlapping multi-UCE contigs.\n".format(
+            len(kept_rows), len(rows), len(removed_uces), len(removed_contigs)
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

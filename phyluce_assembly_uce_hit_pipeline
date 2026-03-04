@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import subprocess
+import sys
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the full UCE hit processing pipeline from either a PAF file or "
+            "a prepared UCE hits table: prepare hits if needed, filter with trace, "
+            "then extract detailed and simplified FASTA outputs."
+        )
+    )
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--hits",
+        help="Input UCE_hits table.",
+    )
+    source_group.add_argument(
+        "--paf",
+        help="Input minimap2 PAF file.",
+    )
+    parser.add_argument(
+        "--contigs",
+        required=True,
+        help="Contigs FASTA used to extract the final UCE sequences.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory for all pipeline outputs.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default=None,
+        help=(
+            "Prefix for output files. Defaults to the hits filename without extension."
+        ),
+    )
+    parser.add_argument(
+        "--sample-name",
+        default=None,
+        help="Sample name to embed in FASTA headers.",
+    )
+    parser.add_argument(
+        "--regex",
+        default=r"^(.+?)(?:_p\d+.*)$",
+        help="Regex used to convert Query name to the parent UCE locus.",
+    )
+    parser.add_argument(
+        "--min-identity",
+        type=float,
+        default=0.8,
+        help="Minimum Identity for the PAF-to-UCE-hits preparation step.",
+    )
+    parser.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.8,
+        help="Minimum Coverage for the PAF-to-UCE-hits preparation step.",
+    )
+    parser.add_argument(
+        "--reverse-complement-negative",
+        action="store_true",
+        default=False,
+        help="Reverse-complement extracted sequences when the inferred locus strand is '-'.",
+    )
+    parser.add_argument(
+        "--extract-mode",
+        choices=["full-contig", "slice"],
+        default="full-contig",
+        help="Sequence extraction mode for the final FASTA step.",
+    )
+    parser.add_argument(
+        "--flank",
+        type=int,
+        default=0,
+        help="Flanking bases to add on each side when --extract-mode slice is used.",
+    )
+    return parser.parse_args()
+
+
+def run_command(command):
+    proc = subprocess.run(command)
+    if proc.returncode != 0:
+        raise SystemExit(proc.returncode)
+
+
+def main():
+    args = get_args()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    paf_script = os.path.join(
+        script_dir, "phyluce_assembly_prepare_uce_hits_from_paf"
+    )
+    filter_script = os.path.join(script_dir, "phyluce_assembly_filter_uce_hits_trace")
+    extract_script = os.path.join(
+        script_dir, "phyluce_assembly_extract_uce_fasta_from_hits"
+    )
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.prefix:
+        prefix = args.prefix
+    else:
+        source_path = args.paf if args.paf else args.hits
+        prefix = os.path.splitext(os.path.basename(source_path))[0]
+
+    if args.paf:
+        prepared_hits = os.path.join(
+            args.output_dir, "{}.paf_UCE_hits.tsv".format(prefix)
+        )
+        prepared_full = os.path.join(
+            args.output_dir, "{}.paf.tsv".format(prefix)
+        )
+        paf_cmd = [
+            sys.executable,
+            paf_script,
+            "--input",
+            args.paf,
+            "--output-dir",
+            args.output_dir,
+            "--prefix",
+            prefix,
+            "--min-identity",
+            str(args.min_identity),
+            "--min-coverage",
+            str(args.min_coverage),
+        ]
+        run_command(paf_cmd)
+        source_hits = prepared_hits
+    else:
+        prepared_hits = "not_run"
+        prepared_full = "not_run"
+        source_hits = args.hits
+
+    filtered_hits = os.path.join(args.output_dir, "{}.filtered.tsv".format(prefix))
+    decision_trace = os.path.join(
+        args.output_dir, "{}.decision_trace.tsv".format(prefix)
+    )
+    filtered_loci = os.path.join(
+        args.output_dir, "{}.filtered.loci.tsv".format(prefix)
+    )
+    filter_summary = os.path.join(
+        args.output_dir, "{}.filtered.summary.txt".format(prefix)
+    )
+    filter_cmd = [
+        sys.executable,
+        filter_script,
+        "--input",
+        source_hits,
+        "--output",
+        filtered_hits,
+        "--trace-output",
+        decision_trace,
+        "--locus-output",
+        filtered_loci,
+        "--summary",
+        filter_summary,
+        "--regex",
+        args.regex,
+    ]
+    run_command(filter_cmd)
+
+    extract_cmd = [
+        sys.executable,
+        extract_script,
+        "--hits",
+        filtered_loci,
+        "--contigs",
+        args.contigs,
+        "--sample-prefix",
+        args.sample_name or prefix,
+        "--filename-prefix",
+        "{}.filtered".format(prefix),
+        "--regex",
+        args.regex,
+        "--mode",
+        args.extract_mode,
+        "--flank",
+        str(args.flank),
+    ]
+    if args.reverse_complement_negative:
+        extract_cmd.append("--reverse-complement-negative")
+    run_command(extract_cmd)
+
+    detailed_fasta = os.path.join(args.output_dir, "{}.filtered.fasta".format(prefix))
+    simple_fasta = os.path.join(
+        args.output_dir, "{}.filtered.simple.fasta".format(prefix)
+    )
+    name_map = os.path.join(
+        args.output_dir, "{}.filtered.name_map.tsv".format(prefix)
+    )
+
+    sys.stderr.write(
+        "Pipeline complete.\n"
+        "Prepared PAF table: {}\n"
+        "Prepared UCE hits: {}\n"
+        "Filtered hits: {}\n"
+        "Decision trace: {}\n"
+        "Filtered loci: {}\n"
+        "Filter summary: {}\n"
+        "Detailed FASTA: {}\n"
+        "Simple FASTA: {}\n"
+        "Name map: {}\n"
+        "Extract mode: {}\n"
+        "Flank: {}\n".format(
+            prepared_full,
+            prepared_hits,
+            filtered_hits,
+            decision_trace,
+            filtered_loci,
+            filter_summary,
+            detailed_fasta,
+            simple_fasta,
+            name_map,
+            args.extract_mode,
+            args.flank,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import sys
+
+
+PAF_COLUMNS = [
+    "Query name",
+    "Query length",
+    "Query start",
+    "Query end",
+    "Relative strand",
+    "Target name",
+    "Target length",
+    "Target start",
+    "Target end",
+    "Matches",
+    "Alignment block",
+    "MapQ",
+]
+
+OUTPUT_COLUMNS = [
+    "Query name",
+    "Query length",
+    "Query start",
+    "Query end",
+    "Relative strand",
+    "Target name",
+    "Target length",
+    "Target start",
+    "Target end",
+    "Matches",
+    "Alignment block",
+    "Identity",
+    "Coverage",
+    "MapQ",
+]
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert a minimap2 PAF file into a tabular UCE hit file, calculate "
+            "Identity and Coverage, and emit a filtered *_UCE_hits.tsv file."
+        )
+    )
+    parser.add_argument(
+        "--input",
+        required=True,
+        help="Input PAF file.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory. Defaults to the input PAF directory.",
+    )
+    parser.add_argument(
+        "--prefix",
+        default=None,
+        help="Optional filename prefix. Defaults to the input PAF basename.",
+    )
+    parser.add_argument(
+        "--min-identity",
+        type=float,
+        default=0.8,
+        help="Minimum Identity to keep in the *_UCE_hits.tsv file.",
+    )
+    parser.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.8,
+        help="Minimum Coverage to keep in the *_UCE_hits.tsv file.",
+    )
+    return parser.parse_args()
+
+
+def derive_output_paths(input_path, output_dir=None, prefix=None):
+    absolute = os.path.abspath(input_path)
+    directory = output_dir if output_dir else os.path.dirname(absolute)
+    if prefix:
+        stem = prefix
+    else:
+        stem = os.path.basename(absolute)
+    return {
+        "full": os.path.join(directory, "{}.paf.tsv".format(stem)),
+        "hits": os.path.join(directory, "{}.paf_UCE_hits.tsv".format(stem)),
+    }
+
+
+def safe_ratio(numerator, denominator):
+    if denominator == 0:
+        return 0.0
+    return float(numerator) / float(denominator)
+
+
+def parse_paf_row(line, line_number):
+    parts = line.rstrip("\n").split("\t")
+    if len(parts) < 12:
+        raise ValueError(
+            "Line {} has fewer than 12 PAF columns: {}".format(line_number, line.strip())
+        )
+
+    row = dict(zip(PAF_COLUMNS, parts[:12]))
+    query_length = int(row["Query length"])
+    matches = int(row["Matches"])
+    alignment_block = int(row["Alignment block"])
+
+    identity = safe_ratio(matches, alignment_block)
+    coverage = safe_ratio(matches, query_length)
+
+    return {
+        "Query name": row["Query name"],
+        "Query length": query_length,
+        "Query start": int(row["Query start"]),
+        "Query end": int(row["Query end"]),
+        "Relative strand": row["Relative strand"],
+        "Target name": row["Target name"],
+        "Target length": int(row["Target length"]),
+        "Target start": int(row["Target start"]),
+        "Target end": int(row["Target end"]),
+        "Matches": matches,
+        "Alignment block": alignment_block,
+        "Identity": "{:.4f}".format(identity),
+        "Coverage": "{:.4f}".format(coverage),
+        "MapQ": int(row["MapQ"]),
+        "_identity": identity,
+        "_coverage": coverage,
+    }
+
+
+def read_paf(path):
+    rows = []
+    with open(path) as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            rows.append(parse_paf_row(line, line_number))
+    return rows
+
+
+def write_tsv(path, rows):
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=OUTPUT_COLUMNS, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row[key] for key in OUTPUT_COLUMNS})
+
+
+def main():
+    args = get_args()
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
+    outputs = derive_output_paths(args.input, args.output_dir, args.prefix)
+    rows = read_paf(args.input)
+    filtered = [
+        row
+        for row in rows
+        if row["_identity"] >= args.min_identity
+        and row["_coverage"] >= args.min_coverage
+    ]
+
+    write_tsv(outputs["full"], rows)
+    write_tsv(outputs["hits"], filtered)
+
+    sys.stderr.write(
+        "Processed {} rows from {}.\n"
+        "Full table: {}\n"
+        "Filtered UCE hits: {} ({})\n".format(
+            len(rows),
+            args.input,
+            outputs["full"],
+            outputs["hits"],
+            len(filtered),
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,40 @@
+[2026-02-23 17:31:43] [from Darwin SavannaMacBookPro-9.local]  3234  ./RefMIG.sh
+[2026-02-23 17:42:07] [from Darwin SavannaMacBookPro-9.local]  3234  ./RefMIG.sh
+[2026-03-02 11:05:36] [from Darwin SavannaMacBookPro-9.local]  3234  ./RefMIG.sh
+[2026-03-02 15:54:14] [from Darwin SavannaMacBookPro-9.local]  3240  python3 ./analyze_uce_quality.py ./DGAh1_output.paf
+[2026-03-02 15:58:26] [from Darwin SavannaMacBookPro-9.local]  3240  python3 ./analyze_uce_quality.py ./DGAh1_output.paf
+[2026-03-02 16:05:04] [from Darwin SavannaMacBookPro-9.local]  3240  python3 ./analyze_uce_quality.py ./DGAh1_output.paf
+[2026-03-02 16:05:21] [from Darwin SavannaMacBookPro-9.local]  3241  python3 /Users/savannachow/Github/phyluce/phyluce_assembly_filter_uce_hits_trace \n  --input /Users/savannachow/Github/phyluce/UCE_hits.txt \n  --output /Users/savannachow/Github/phyluce/UCE_hits.filtered.trace.tsv \n  --trace-output /Users/savannachow/Github/phyluce/UCE_hits.decision_trace.tsv \n  --locus-output /Users/savannachow/Github/phyluce/UCE_hits.filtered.trace.loci.tsv \n  --summary /Users/savannachow/Github/phyluce/UCE_hits.filtered.trace.summary.txt
+
+[2026-03-02 16:21:50] [from Darwin SavannaMacBookPro-9.local]  3241  python3 /Users/savannachow/Github/phyluce/phyluce_assembly_filter_uce_hits_trace \n  --input /Users/savannachow/Github/phyluce/UCE_hits.txt \n  --output /Users/savannachow/Github/phyluce/UCE_hits.filtered.trace.tsv \n  --trace-output /Users/savannachow/Github/phyluce/UCE_hits.decision_trace.tsv \n  --locus-output /Users/savannachow/Github/phyluce/UCE_hits.filtered.trace.loci.tsv \n  --summary /Users/savannachow/Github/phyluce/UCE_hits.filtered.trace.summary.txt
+
+[2026-03-02 16:22:02] [from Darwin SavannaMacBookPro-9.local]  3242  ./phyluce_assembly_filter_uce_hits
+[2026-03-02 16:48:21] [from Darwin SavannaMacBookPro-9.local]  3243  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --output ./AhDG1.fasta --reverse-complement-negative --sample-name AhDG1
+[2026-03-02 16:53:04] [from Darwin SavannaMacBookPro-9.local]  3243  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --output ./AhDG1.fasta --reverse-complement-negative --sample-name AhDG1
+[2026-03-02 16:53:04] [from Darwin SavannaMacBookPro-9.local]  3243  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --output ./AhDG1.fasta --reverse-complement-negative --sample-name AhDG1
+[2026-03-02 16:53:05] [from Darwin SavannaMacBookPro-9.local]  3243  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --output ./AhDG1.fasta --reverse-complement-negative --sample-name AhDG1
+[2026-03-02 16:53:08] [from Darwin SavannaMacBookPro-9.local]  3244  clear
+[2026-03-02 16:54:04] [from Darwin SavannaMacBookPro-9.local]  3245  python3 ./phyluce_assembly_extract_uce_fasta_from_hits
+[2026-03-02 16:55:28] [from Darwin SavannaMacBookPro-9.local]  3245  python3 ./phyluce_assembly_extract_uce_fasta_from_hits
+[2026-03-02 16:57:03] [from Darwin SavannaMacBookPro-9.local]  3246  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --output ./AhDG1.fasta --reverse-complement-negative --sample-name AhDG1
+[2026-03-02 17:00:43] [from Darwin SavannaMacBookPro-9.local]  3247  python3 ./phyluce_assembly_extract_uce_fasta_from_hits
+[2026-03-02 17:01:32] [from Darwin SavannaMacBookPro-9.local]  3248  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --sample-prefix AhDG1 --reverse-complement-negative
+[2026-03-02 17:04:31] [from Darwin SavannaMacBookPro-9.local]  3248  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --sample-prefix AhDG1 --reverse-complement-negative
+[2026-03-02 17:05:13] [from Darwin SavannaMacBookPro-9.local]  3249  python3 ./phyluce_assembly_extract_uce_fasta_from_hits
+[2026-03-02 17:05:45] [from Darwin SavannaMacBookPro-9.local]  3250  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --sample-prefix AhDG1 --reverse-complement-negative --filname-prefix AhDG1
+[2026-03-02 17:05:56] [from Darwin SavannaMacBookPro-9.local]  3251  python3 ./phyluce_assembly_extract_uce_fasta_from_hits --hits ./UCE_hits.filtered.tsv --contigs ./contigs.fasta --sample-prefix AhDG1 --reverse-complement-negative --filename-prefix AhDG1
+[2026-03-02 17:12:41] [from Darwin SavannaMacBookPro-9.local]  3252  python3 ./phyluce_assembly_filter_uce_hits_trace
+[2026-03-02 17:15:11] [from Darwin SavannaMacBookPro-9.local]  3252  python3 ./phyluce_assembly_filter_uce_hits_trace
+[2026-03-02 17:15:11] [from Darwin SavannaMacBookPro-9.local]  3252  python3 ./phyluce_assembly_filter_uce_hits_trace
+[2026-03-02 17:15:12] [from Darwin SavannaMacBookPro-9.local]  3252  python3 ./phyluce_assembly_filter_uce_hits_trace
+[2026-03-02 17:15:12] [from Darwin SavannaMacBookPro-9.local]  3252  python3 ./phyluce_assembly_filter_uce_hits_trace
+[2026-03-02 17:15:12] [from Darwin SavannaMacBookPro-9.local]  3252  python3 ./phyluce_assembly_filter_uce_hits_trace
+[2026-03-02 17:38:50] [from Darwin SavannaMacBookPro-9.local]  3253  python3 ./phyluce_assembly_uce_hit_pipeline
+[2026-03-02 17:40:48] [from Darwin SavannaMacBookPro-9.local]  3254  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output_dir ./DGAh1 --sample-name DGAh1  --reverse-complement-negative
+[2026-03-02 17:40:55] [from Darwin SavannaMacBookPro-9.local]  3255  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output_dir DGAh1 --sample-name DGAh1  --reverse-complement-negative
+[2026-03-02 17:41:11] [from Darwin SavannaMacBookPro-9.local]  3256  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output-dir DGAh1 --sample-name DGAh1  --reverse-complement-negative
+[2026-03-02 17:54:17] [from Darwin SavannaMacBookPro-9.local]  3256  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output-dir DGAh1 --sample-name DGAh1  --reverse-complement-negative
+[2026-03-02 17:54:23] [from Darwin SavannaMacBookPro-9.local]  3256  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output-dir DGAh1 --sample-name DGAh1  --reverse-complement-negative
+[2026-03-02 18:01:49] [from Darwin SavannaMacBookPro-9.local]  3257  '/Users/savannachow/Github/phyluce/phyluce_assembly_extract_uce_fasta_from_hits'
+[2026-03-02 18:02:16] [from Darwin SavannaMacBookPro-9.local]  3258  python3 ./phyluce_assembly_uce_hit_pipeline
+[2026-03-02 18:03:22] [from Darwin SavannaMacBookPro-9.local]  3259  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output-dir DGAh1 --sample-name DGAh1  --reverse-complement-negative --extract-mode full-contig 

@@ -1,0 +1,1528 @@
+#!/usr/bin/env python3
+
+import argparse
+import concurrent.futures
+import datetime
+import os
+import re
+import shutil
+import shlex
+import subprocess
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+
+FASTQ_PATTERN = re.compile(r"^(?P<sample>.+)_R(?P<read>[12])\.(?:fastq|fq)$", re.IGNORECASE)
+FASTA_EXTENSIONS = (".fasta", ".fa", ".fna")
+GZ_FASTQ_EXTENSIONS = (".fastq.gz", ".fq.gz")
+FASTQ_EXTENSIONS = (".fastq", ".fq")
+STAGE_NAMES = {
+    0: "00_Log",
+    1: "01_Trimmed",
+    2: "02_Spades_assembly",
+    3: "03_Alignment",
+    4: "04_prepare_uce_hits_from_paf",
+    5: "05_Filtering_uce_hits_trace",
+    6: "06_extract_uce_fasta_from_hits",
+    7: "07_Aggregated_loci",
+}
+PROJECT_INFO_NAME = "project.info"
+INTERACTIVE_ACTIONS = {
+    "f": ("full", "Run full pipeline (01-07)"),
+    "1": ("stage1", "Run 01: Trim reads with fastp"),
+    "2": ("stage2", "Run 02: Assemble contigs with SPAdes"),
+    "3": ("stage3", "Run 03: Align UCE probes to contigs with minimap2"),
+    "4": ("stage4", "Run 04: Prepare UCE hits from PAF"),
+    "5": ("stage5", "Run 05: Filter UCE hits and write trace"),
+    "6": ("stage6", "Run 06: Extract UCE FASTA from filtered loci"),
+    "7": ("stage7", "Run 07: Aggregate all filtered loci tables"),
+}
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a UCE assembly workflow from raw paired-end FASTQ files in the current "
+            "working directory: trim, assemble, align probes, prepare UCE hits, filter, "
+            "and extract UCE FASTA sequences."
+        )
+    )
+    parser.add_argument(
+        "--raw-dir",
+        default=None,
+        help=(
+            "Directory containing the raw FASTQ files. If omitted, choose from the "
+            "first-level directories under the current working directory."
+        ),
+    )
+    parser.add_argument(
+        "--project-id",
+        default=None,
+        help=(
+            "Project identifier for the output directory created under the current "
+            "working directory."
+        ),
+    )
+    parser.add_argument(
+        "--probes",
+        default=None,
+        help=(
+            "Path to the probe FASTA. If omitted, the script searches the first level "
+            "of the current working directory."
+        ),
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Total CPU threads available to the workflow.",
+    )
+    parser.add_argument(
+        "--fastp-threads-per-job",
+        type=int,
+        default=8,
+        help="Threads per fastp job. Default matches the requested workflow.",
+    )
+    parser.add_argument(
+        "--max-fastp-jobs",
+        type=int,
+        default=None,
+        help="Maximum concurrent fastp jobs. Defaults to total_threads // fastp_threads_per_job.",
+    )
+    parser.add_argument(
+        "--spades-threads-per-job",
+        type=int,
+        default=None,
+        help="Threads per SPAdes job. Defaults to all available workflow threads.",
+    )
+    parser.add_argument(
+        "--max-spades-jobs",
+        type=int,
+        default=1,
+        help="Maximum concurrent SPAdes jobs. Default is 1.",
+    )
+    parser.add_argument(
+        "--spades-memory-gb",
+        type=int,
+        default=250,
+        help="Memory limit for each SPAdes job in GB. Default is 250.",
+    )
+    parser.add_argument(
+        "--min-identity",
+        type=float,
+        default=0.8,
+        help="Minimum Identity for the PAF-to-UCE-hits preparation step.",
+    )
+    parser.add_argument(
+        "--min-coverage",
+        type=float,
+        default=0.8,
+        help="Minimum Coverage for the PAF-to-UCE-hits preparation step.",
+    )
+    parser.add_argument(
+        "--extract-mode",
+        choices=["full-contig", "slice"],
+        default="full-contig",
+        help="Final UCE FASTA extraction mode. Default is full-contig.",
+    )
+    parser.add_argument(
+        "--flank",
+        type=int,
+        default=0,
+        help="Flanking bases to add on each side when --extract-mode slice is used.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Only report detected samples, chosen inputs, planned output paths, and "
+            "commands without executing them."
+        ),
+    )
+    parser.add_argument(
+        "--start-stage",
+        type=int,
+        choices=range(1, 8),
+        default=None,
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci.",
+    )
+    parser.add_argument(
+        "--end-stage",
+        type=int,
+        choices=range(1, 8),
+        default=None,
+        help="Stage number to end at.",
+    )
+    return parser.parse_args()
+
+
+def require_executable(name_candidates):
+    for name in name_candidates:
+        path = shutil.which(name)
+        if path:
+            return path
+    raise RuntimeError(
+        "Required executable not found: {}".format(", ".join(name_candidates))
+    )
+
+
+def timestamp():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+class PipelineLogger:
+    def __init__(self, log_dir):
+        self.log_dir = Path(log_dir)
+        self.pipeline_log = self.log_dir / "pipeline.log"
+        self.commands_log = self.log_dir / "commands.log"
+
+    def write(self, path, message):
+        with open(path, "a") as handle:
+            handle.write(message.rstrip("\n") + "\n")
+
+    def info(self, message):
+        line = "[{}] {}".format(timestamp(), message)
+        print(line)
+        self.write(self.pipeline_log, line)
+
+    def command(self, command, cwd=None, log_path=None):
+        line = "[{}] CMD cwd={} :: {}".format(
+            timestamp(),
+            cwd or os.getcwd(),
+            " ".join(shlex.quote(part) for part in command),
+        )
+        self.write(self.commands_log, line)
+        if log_path:
+            self.write(log_path, line)
+
+    def command_status(self, returncode, log_path=None):
+        line = "[{}] EXIT {}".format(timestamp(), returncode)
+        self.write(self.commands_log, line)
+        if log_path:
+            self.write(log_path, line)
+
+    def save_run_config(self, config):
+        path = self.log_dir / "run_config.txt"
+        with open(path, "w") as handle:
+            for key in sorted(config):
+                handle.write("{}\t{}\n".format(key, config[key]))
+
+
+def stream_process(command, logger, stdout_path=None, cwd=None, log_path=None):
+    logger.command(command, cwd=cwd, log_path=log_path)
+    if stdout_path is not None:
+        stdout_handle = open(stdout_path, "w")
+        stderr_setting = subprocess.PIPE
+    else:
+        stdout_handle = subprocess.PIPE
+        stderr_setting = subprocess.STDOUT
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=stdout_handle,
+        stderr=stderr_setting,
+        text=True,
+        bufsize=1,
+    )
+    captured_lines = []
+    if stdout_path is None:
+        if process.stdout is not None:
+            for line in process.stdout:
+                sys.stderr.write(line)
+                captured_lines.append(line)
+                if log_path:
+                    with open(log_path, "a") as handle:
+                        handle.write(line)
+    else:
+        if process.stderr is not None:
+            for line in process.stderr:
+                sys.stderr.write(line)
+                captured_lines.append(line)
+                if log_path:
+                    with open(log_path, "a") as handle:
+                        handle.write(line)
+    returncode = process.wait()
+    if stdout_path is not None:
+        stdout_handle.close()
+    logger.command_status(returncode, log_path=log_path)
+    if returncode != 0:
+        raise RuntimeError("Command failed: {}".format(" ".join(command)))
+    return "".join(captured_lines)
+
+
+def format_command(command):
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def get_stage_dirs(workdir):
+    return {name: Path(workdir) / name for name in STAGE_NAMES.values()}
+
+
+def ensure_stage_dirs(workdir):
+    paths = get_stage_dirs(workdir)
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def choose_directory(current_dir, label):
+    directories = [
+        path
+        for path in sorted(Path(current_dir).iterdir())
+        if path.is_dir() and not path.name.startswith(".")
+    ]
+    if not sys.stdin.isatty():
+        if not directories:
+            raise RuntimeError(
+                "No candidate directories found under {}. Re-run with --raw-dir.".format(
+                    current_dir
+                )
+            )
+        raise RuntimeError(
+            "Multiple choices require interaction. Re-run with --raw-dir.\n{}".format(
+                "\n".join(
+                    "  {}. {}".format(idx + 1, path.name)
+                    for idx, path in enumerate(directories)
+                )
+            )
+        )
+    if not directories:
+        while True:
+            answer = input("Enter {} path: ".format(label)).strip()
+            if not answer:
+                print("Path cannot be empty.")
+                continue
+            path = Path(answer).expanduser().resolve()
+            if path.is_dir():
+                return path
+            print("Directory not found: {}".format(path))
+    print("Choose {}:".format(label))
+    for idx, path in enumerate(directories, start=1):
+        print("  {}. {}".format(idx, path.name))
+    print("  m. Enter a path manually")
+    while True:
+        answer = input("Enter choice number (or m): ").strip().lower()
+        if answer == "m":
+            manual = input("Enter {} path: ".format(label)).strip()
+            if not manual:
+                print("Path cannot be empty.")
+                continue
+            path = Path(manual).expanduser().resolve()
+            if path.is_dir():
+                return path
+            print("Directory not found: {}".format(path))
+            continue
+        if answer.isdigit():
+            choice = int(answer)
+            if 1 <= choice <= len(directories):
+                return directories[choice - 1]
+        print("Invalid choice.")
+
+
+def choose_action_interactively():
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Stage selection requires interaction. Re-run with --start-stage/--end-stage."
+        )
+    print("Choose workflow action:")
+    print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
+    for key in ("1", "2", "3", "4", "5", "6", "7"):
+        print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
+    while True:
+        answer = input("Enter choice (f or 1-7): ").strip().lower()
+        if answer in INTERACTIVE_ACTIONS:
+            key = INTERACTIVE_ACTIONS[answer][0]
+            if key == "full":
+                return 1, 7
+            return int(key.replace("stage", "")), int(key.replace("stage", ""))
+        print("Invalid choice.")
+
+
+def resolve_raw_dir(current_dir, raw_dir_arg):
+    if raw_dir_arg:
+        path = Path(raw_dir_arg).expanduser().resolve()
+        if not path.is_dir():
+            raise RuntimeError("Raw FASTQ directory not found: {}".format(path))
+        return path
+    return choose_directory(current_dir, "the raw FASTQ directory")
+
+
+def project_info_path(project_dir):
+    return Path(project_dir) / PROJECT_INFO_NAME
+
+
+def read_project_info(project_dir):
+    path = project_info_path(project_dir)
+    if not path.is_file():
+        return None
+    info = {}
+    with open(path) as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if not line or "\t" not in line:
+                continue
+            key, value = line.split("\t", 1)
+            info[key] = value
+    if "project_id" not in info:
+        return None
+    return info
+
+
+def write_project_info(project_dir, info):
+    path = project_info_path(project_dir)
+    with open(path, "w") as handle:
+        for key, value in info.items():
+            handle.write("{}\t{}\n".format(key, value))
+
+
+def find_existing_projects(current_dir):
+    projects = []
+    for path in sorted(Path(current_dir).iterdir()):
+        if not path.is_dir() or path.name.startswith("."):
+            continue
+        info = read_project_info(path)
+        if info:
+            projects.append((path, info))
+    return projects
+
+
+def resolve_project_from_info(current_dir, raw_dir):
+    candidates = []
+    raw_dir_resolved = str(Path(raw_dir).resolve())
+    for project_dir, info in find_existing_projects(current_dir):
+        stored_raw = info.get("raw_dir")
+        if stored_raw and stored_raw != "N/A" and Path(stored_raw).resolve() == Path(raw_dir_resolved):
+            candidates.append((project_dir, info))
+            continue
+        if project_dir.name == Path(raw_dir).name:
+            candidates.append((project_dir, info))
+    if not candidates:
+        return None, None
+    if len(candidates) > 1:
+        raise RuntimeError(
+            "Multiple existing projects match raw directory {}:\n{}".format(
+                raw_dir,
+                "\n".join("  {}".format(project_dir) for project_dir, _ in candidates),
+            )
+        )
+    project_dir, info = candidates[0]
+    return info["project_id"], project_dir
+
+
+def infer_legacy_project_dir(current_dir, raw_dir):
+    candidate = Path(current_dir) / Path(raw_dir).name
+    if not candidate.is_dir():
+        return None, None
+    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7)):
+        return candidate.name, candidate
+    return None, None
+
+
+def resolve_project_dir(current_dir, project_id_arg):
+    if project_id_arg:
+        project_id = project_id_arg.strip()
+    elif sys.stdin.isatty():
+        project_id = input("Enter project ID: ").strip()
+    else:
+        raise RuntimeError("Project ID is required. Re-run with --project-id.")
+    if not project_id:
+        raise RuntimeError("Project ID cannot be empty.")
+    project_dir = Path(current_dir) / project_id
+    if project_dir.exists():
+        raise RuntimeError(
+            "Project directory already exists, refusing to overwrite: {}".format(
+                project_dir
+            )
+        )
+    project_dir.mkdir(parents=True, exist_ok=False)
+    return project_id, project_dir
+
+
+def resolve_project_path(current_dir, project_id_arg, raw_dir=None):
+    if project_id_arg:
+        project_id = project_id_arg.strip()
+    elif raw_dir is not None:
+        inferred_project_id, inferred_project_dir = resolve_project_from_info(current_dir, raw_dir)
+        if inferred_project_id:
+            return inferred_project_id, inferred_project_dir
+        legacy_project_id, legacy_project_dir = infer_legacy_project_dir(current_dir, raw_dir)
+        if legacy_project_id:
+            return legacy_project_id, legacy_project_dir
+        if sys.stdin.isatty():
+            default_project_id = Path(raw_dir).name
+            project_id = input("Enter project ID [{}]: ".format(default_project_id)).strip()
+            if not project_id:
+                project_id = default_project_id
+        else:
+            project_id = Path(raw_dir).name
+    elif sys.stdin.isatty():
+        project_id = input("Enter project ID: ").strip()
+    else:
+        raise RuntimeError("Project ID is required. Re-run with --project-id.")
+    if not project_id:
+        raise RuntimeError("Project ID cannot be empty.")
+    project_dir = Path(current_dir) / project_id
+    return project_id, project_dir
+
+
+def resolve_project_for_run(current_dir, project_id_arg, start_stage, raw_dir=None):
+    project_id, project_dir = resolve_project_path(current_dir, project_id_arg, raw_dir=raw_dir)
+    if project_dir.exists():
+        if start_stage == 1:
+            raise RuntimeError(
+                "Project directory already exists. Use a new --project-id, or resume "
+                "from a later stage with --start-stage > 1: {}".format(project_dir)
+            )
+        if not project_dir.is_dir():
+            raise RuntimeError("Project path exists but is not a directory: {}".format(project_dir))
+    else:
+        if start_stage > 1:
+            raise RuntimeError(
+                "Project directory does not exist for resume run: {}".format(project_dir)
+            )
+        project_dir.mkdir(parents=True, exist_ok=False)
+    return project_id, project_dir
+
+
+def determine_stage_range(args):
+    if args.start_stage is None and args.end_stage is None:
+        if sys.stdin.isatty():
+            return choose_action_interactively()
+        return 1, 7
+    if args.start_stage is None and args.end_stage is not None:
+        return args.end_stage, args.end_stage
+    if args.start_stage is not None and args.end_stage is None:
+        return args.start_stage, args.start_stage
+    return args.start_stage, args.end_stage
+
+
+def cli_flag_present(flag):
+    return any(
+        token == flag or token.startswith(flag + "=")
+        for token in sys.argv[1:]
+    )
+
+
+def prompt_with_default(message, default):
+    if not sys.stdin.isatty():
+        return default
+    prompt = "{} [{}]: ".format(message, default)
+    answer = input(prompt).strip()
+    return answer if answer else default
+
+
+def prompt_int_with_default(message, default):
+    if not sys.stdin.isatty():
+        return default
+    display = "auto" if default is None else str(default)
+    while True:
+        answer = input("{} [{}]: ".format(message, display)).strip()
+        if not answer:
+            return default
+        if answer.lower() == "auto":
+            return None
+        if answer.isdigit() and int(answer) > 0:
+            return int(answer)
+        print("Please enter a positive integer or 'auto'.")
+
+
+def prompt_float_with_default(message, default):
+    if not sys.stdin.isatty():
+        return default
+    while True:
+        answer = input("{} [{}]: ".format(message, default)).strip()
+        if not answer:
+            return default
+        try:
+            return float(answer)
+        except ValueError:
+            print("Please enter a numeric value.")
+
+
+def prompt_choice_with_default(message, default, choices):
+    if not sys.stdin.isatty():
+        return default
+    while True:
+        answer = input(
+            "{} [{}] ({}): ".format(message, default, "/".join(choices))
+        ).strip()
+        if not answer:
+            return default
+        if answer in choices:
+            return answer
+        print("Please choose one of: {}".format(", ".join(choices)))
+
+
+def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
+    settings = {}
+    saved_probes = project_info.get("probes")
+    if saved_probes == "N/A":
+        saved_probes = None
+    if 3 in selected_stages:
+        if cli_flag_present("--probes"):
+            settings["probes"] = choose_probe_fasta(current_dir, args.probes)
+        elif sys.stdin.isatty():
+            if saved_probes:
+                chosen = prompt_with_default("Probe FASTA path", saved_probes)
+                settings["probes"] = choose_probe_fasta(current_dir, chosen)
+            else:
+                settings["probes"] = choose_probe_fasta(current_dir, args.probes)
+        elif saved_probes:
+            settings["probes"] = choose_probe_fasta(current_dir, saved_probes)
+        else:
+            settings["probes"] = choose_probe_fasta(current_dir, args.probes)
+    else:
+        settings["probes"] = saved_probes
+
+    def resolve_int(key, arg_value, prompt_message, default_value, selected_keys):
+        saved_value = project_info.get(key)
+        if saved_value in (None, "N/A", "auto"):
+            current = default_value
+        else:
+            current = int(saved_value)
+        if not (selected_stages & selected_keys):
+            return current if not cli_flag_present("--" + key.replace("_", "-")) else arg_value
+        if cli_flag_present("--" + key.replace("_", "-")):
+            return arg_value
+        return prompt_int_with_default(prompt_message, current)
+
+    def resolve_float(key, arg_value, prompt_message, default_value, selected_keys):
+        saved_value = project_info.get(key)
+        current = float(saved_value) if saved_value not in (None, "N/A") else default_value
+        if not (selected_stages & selected_keys):
+            return current if not cli_flag_present("--" + key.replace("_", "-")) else arg_value
+        if cli_flag_present("--" + key.replace("_", "-")):
+            return arg_value
+        return prompt_float_with_default(prompt_message, current)
+
+    settings["threads"] = resolve_int(
+        "threads",
+        args.threads,
+        "Total CPU threads",
+        args.threads,
+        {1, 2, 3},
+    )
+    settings["fastp_threads_per_job"] = resolve_int(
+        "fastp_threads_per_job",
+        args.fastp_threads_per_job,
+        "fastp threads per job",
+        args.fastp_threads_per_job,
+        {1},
+    )
+    settings["max_fastp_jobs"] = resolve_int(
+        "max_fastp_jobs",
+        args.max_fastp_jobs,
+        "Maximum concurrent fastp jobs",
+        args.max_fastp_jobs,
+        {1},
+    )
+    spades_threads_default = settings["threads"]
+    settings["spades_threads_per_job"] = resolve_int(
+        "spades_threads_per_job",
+        args.spades_threads_per_job,
+        "SPAdes threads per job",
+        spades_threads_default,
+        {2},
+    )
+    settings["max_spades_jobs"] = resolve_int(
+        "max_spades_jobs",
+        args.max_spades_jobs,
+        "Maximum concurrent SPAdes jobs",
+        1,
+        {2},
+    )
+    settings["spades_memory_gb"] = resolve_int(
+        "spades_memory_gb",
+        args.spades_memory_gb,
+        "SPAdes memory limit (GB) per job",
+        args.spades_memory_gb,
+        {2},
+    )
+    settings["min_identity"] = resolve_float(
+        "min_identity",
+        args.min_identity,
+        "Minimum identity for PAF filtering",
+        args.min_identity,
+        {4},
+    )
+    settings["min_coverage"] = resolve_float(
+        "min_coverage",
+        args.min_coverage,
+        "Minimum coverage for PAF filtering",
+        args.min_coverage,
+        {4},
+    )
+
+    saved_mode = project_info.get("extract_mode")
+    mode_default = saved_mode if saved_mode not in (None, "N/A") else args.extract_mode
+    if 6 in selected_stages and not cli_flag_present("--extract-mode"):
+        settings["extract_mode"] = prompt_choice_with_default(
+            "Extract mode", mode_default, ["full-contig", "slice"]
+        )
+    else:
+        settings["extract_mode"] = args.extract_mode if cli_flag_present("--extract-mode") else mode_default
+
+    flank_saved = project_info.get("flank")
+    flank_default = int(flank_saved) if flank_saved not in (None, "N/A") else args.flank
+    if 6 in selected_stages and settings["extract_mode"] == "slice" and not cli_flag_present("--flank"):
+        settings["flank"] = prompt_int_with_default("Flanking bases", flank_default)
+    elif cli_flag_present("--flank"):
+        settings["flank"] = args.flank
+    else:
+        settings["flank"] = flank_default
+
+    return settings
+
+
+def decompress_fastqs(workdir, threads, decompressor, logger, log_root):
+    workdir = Path(workdir)
+    for path in sorted(workdir.iterdir()):
+        if not path.is_file():
+            continue
+        lower = path.name.lower()
+        if not lower.endswith(GZ_FASTQ_EXTENSIONS):
+            continue
+        target = path.with_suffix("")
+        if target.exists():
+            continue
+        if "pigz" in os.path.basename(decompressor):
+            command = [decompressor, "-d", "-k", "-p", str(threads), str(path)]
+        else:
+            command = [decompressor, "-d", "-k", str(path)]
+        stream_process(
+            command,
+            logger,
+            log_path=log_root / "decompress.{}.log".format(path.name),
+        )
+
+
+def find_raw_fastq_pairs(workdir):
+    pairs = {}
+    raw_fastq_files = []
+    invalid_names = []
+    workdir = Path(workdir)
+    for path in sorted(workdir.iterdir()):
+        if not path.is_file():
+            continue
+        lower = path.name.lower()
+        if not lower.endswith(FASTQ_EXTENSIONS):
+            continue
+        raw_fastq_files.append(path)
+        match = FASTQ_PATTERN.match(path.name)
+        if not match:
+            invalid_names.append(path.name)
+            continue
+        sample = match.group("sample")
+        read = match.group("read")
+        pairs.setdefault(sample, {})
+        if read in pairs[sample]:
+            raise RuntimeError(
+                "Duplicate FASTQ detected for sample {} read R{}.".format(sample, read)
+            )
+        pairs[sample][read] = path
+    if invalid_names:
+        raise RuntimeError(
+            "Found FASTQ files that do not match the required pattern "
+            "'sampleID_species_R1/2.fastq' or '.fq':\n{}".format(
+                "\n".join("  {}".format(name) for name in invalid_names)
+            )
+        )
+    missing = [sample for sample, reads in pairs.items() if set(reads) != {"1", "2"}]
+    if missing:
+        raise RuntimeError(
+            "Missing R1/R2 mate for samples: {}".format(", ".join(sorted(missing)))
+        )
+    if not raw_fastq_files:
+        raise RuntimeError("No FASTQ pairs found in {}".format(workdir))
+    matched_count = sum(len(reads) for reads in pairs.values())
+    if matched_count != len(raw_fastq_files):
+        raise RuntimeError(
+            "FASTQ validation failed: found {} FASTQ files, but only {} matched the "
+            "required naming rule.".format(len(raw_fastq_files), matched_count)
+        )
+    return {sample: (reads["1"], reads["2"]) for sample, reads in sorted(pairs.items())}
+
+
+def choose_probe_fasta(workdir, probes_arg):
+    if probes_arg:
+        path = Path(probes_arg).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError("Probe FASTA not found: {}".format(path))
+        return path
+
+    candidates = [
+        path
+        for path in sorted(Path(workdir).iterdir())
+        if path.is_file() and path.suffix.lower() in FASTA_EXTENSIONS
+    ]
+    if not candidates:
+        raise RuntimeError(
+            "No probe FASTA found in the first level of {}".format(workdir)
+        )
+    if len(candidates) == 1:
+        return candidates[0]
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Multiple FASTA files found in {}. Re-run with --probes.\n{}".format(
+                workdir,
+                "\n".join("  {}. {}".format(idx + 1, path.name) for idx, path in enumerate(candidates)),
+            )
+        )
+    print("Multiple FASTA files found. Choose the probe FASTA:")
+    for idx, path in enumerate(candidates, start=1):
+        print("  {}. {}".format(idx, path.name))
+    while True:
+        answer = input("Enter choice number: ").strip()
+        if answer.isdigit():
+            choice = int(answer)
+            if 1 <= choice <= len(candidates):
+                return candidates[choice - 1]
+        print("Invalid choice.")
+
+
+def fastp_outputs(stage_dir, sample):
+    sample_dir = stage_dir / sample
+    report_dir = sample_dir / "{}_fastp_reports".format(sample)
+    return {
+        "sample_dir": sample_dir,
+        "report_dir": report_dir,
+        "r1": sample_dir / "{}_trimmed_R1.fastq".format(sample),
+        "r2": sample_dir / "{}_trimmed_R2.fastq".format(sample),
+        "html": report_dir / "{}.fastp.html".format(sample),
+        "json": report_dir / "{}.fastp.json".format(sample),
+    }
+
+
+def build_fastp_command(sample, raw_pair, trimmed_root, fastp_path, threads_per_job):
+    r1, r2 = raw_pair
+    outputs = fastp_outputs(trimmed_root, sample)
+    command = [
+        fastp_path,
+        "--overrepresentation_analysis",
+        "--detect_adapter_for_pe",
+        "--thread",
+        str(threads_per_job),
+        "-i",
+        str(r1),
+        "-I",
+        str(r2),
+        "-o",
+        str(outputs["r1"]),
+        "-O",
+        str(outputs["r2"]),
+        "-h",
+        str(outputs["html"]),
+        "-j",
+        str(outputs["json"]),
+    ]
+    return command, outputs
+
+
+def run_fastp(sample, raw_pair, trimmed_root, fastp_path, threads_per_job, logger, log_root):
+    command, outputs = build_fastp_command(
+        sample, raw_pair, trimmed_root, fastp_path, threads_per_job
+    )
+    outputs["sample_dir"].mkdir(parents=True, exist_ok=True)
+    outputs["report_dir"].mkdir(parents=True, exist_ok=True)
+    if outputs["r1"].exists() and outputs["r2"].exists():
+        return
+    logger.info("Running fastp for {}".format(sample))
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "fastp.{}.log".format(sample),
+    )
+
+
+def concurrency_from_threads(total_threads, per_job, override):
+    if override is not None:
+        return max(1, override)
+    return max(1, total_threads // per_job)
+
+
+def run_fastp_for_samples(samples, trimmed_root, fastp_path, total_threads, threads_per_job, max_jobs, logger, log_root):
+    jobs = concurrency_from_threads(total_threads, threads_per_job, max_jobs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = [
+            executor.submit(
+                run_fastp,
+                sample,
+                raw_pair,
+                trimmed_root,
+                fastp_path,
+                threads_per_job,
+                logger,
+                log_root,
+            )
+            for sample, raw_pair in samples.items()
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
+
+def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, logger, log_root):
+    outputs = fastp_outputs(trimmed_root, sample)
+    sample_out = assembly_root / sample
+    contigs = sample_out / "contigs.fasta"
+    if contigs.exists():
+        return
+    sample_out.mkdir(parents=True, exist_ok=True)
+    command = build_spades_command(
+        sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb
+    )
+    logger.info("Running SPAdes for {}".format(sample))
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "spades.{}.log".format(sample),
+    )
+
+
+def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb):
+    outputs = fastp_outputs(trimmed_root, sample)
+    sample_out = assembly_root / sample
+    return [
+        spades_path,
+        "-t",
+        str(per_job_threads),
+        "-m",
+        str(memory_gb),
+        "--careful",
+        "-1",
+        str(outputs["r1"]),
+        "-2",
+        str(outputs["r2"]),
+        "-o",
+        str(sample_out),
+    ]
+
+
+def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, logger, log_root):
+    jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = [
+            executor.submit(
+                run_spades,
+                sample,
+                trimmed_root,
+                assembly_root,
+                spades_path,
+                per_job_threads,
+                memory_gb,
+                logger,
+                log_root,
+            )
+            for sample in samples
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
+
+
+def run_alignment_for_samples(samples, assembly_root, alignment_root, probes_path, minimap2_path, threads, logger, log_root):
+    for sample in samples:
+        sample_dir = alignment_root / sample
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        paf = sample_dir / "{}.paf".format(sample)
+        if paf.exists():
+            continue
+        contigs = assembly_root / sample / "contigs.fasta"
+        if not contigs.exists():
+            raise RuntimeError("Missing contigs.fasta for sample {}".format(sample))
+        command = build_alignment_command(
+            sample, assembly_root, probes_path, minimap2_path, threads
+        )
+        logger.info("Running minimap2 for {}".format(sample))
+        stream_process(
+            command,
+            logger,
+            stdout_path=str(paf),
+            log_path=log_root / "alignment.{}.log".format(sample),
+        )
+
+
+def build_alignment_command(sample, assembly_root, probes_path, minimap2_path, threads):
+    contigs = assembly_root / sample / "contigs.fasta"
+    return [
+            minimap2_path,
+            "-x",
+            "sr",
+            "-c",
+            "--secondary=no",
+            "-t",
+            str(threads),
+            str(contigs),
+            str(probes_path),
+        ]
+
+
+def run_prepare_for_samples(samples, alignment_root, prepare_root, prepare_script, min_identity, min_coverage, logger, log_root):
+    for sample in samples:
+        sample_dir = prepare_root / sample
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        hits = sample_dir / "{}.paf_UCE_hits.tsv".format(sample)
+        if hits.exists():
+            continue
+        paf = alignment_root / sample / "{}.paf".format(sample)
+        command = build_prepare_command(
+            sample, alignment_root, prepare_root, prepare_script, min_identity, min_coverage
+        )
+        logger.info("Preparing UCE hits from PAF for {}".format(sample))
+        stream_process(
+            command,
+            logger,
+            log_path=log_root / "prepare_hits.{}.log".format(sample),
+        )
+
+
+def build_prepare_command(sample, alignment_root, prepare_root, prepare_script, min_identity, min_coverage):
+    sample_dir = prepare_root / sample
+    paf = alignment_root / sample / "{}.paf".format(sample)
+    return [
+            sys.executable,
+            prepare_script,
+            "--input",
+            str(paf),
+            "--output-dir",
+            str(sample_dir),
+            "--prefix",
+            sample,
+            "--min-identity",
+            str(min_identity),
+            "--min-coverage",
+            str(min_coverage),
+        ]
+
+
+def run_filter_for_samples(samples, prepare_root, filter_root, filter_script, logger, log_root):
+    for sample in samples:
+        sample_dir = filter_root / sample
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        filtered_hits = sample_dir / "{}.filtered.tsv".format(sample)
+        if filtered_hits.exists():
+            continue
+        input_hits = prepare_root / sample / "{}.paf_UCE_hits.tsv".format(sample)
+        command = build_filter_command(sample, prepare_root, filter_root, filter_script)
+        logger.info("Filtering UCE hits for {}".format(sample))
+        stream_process(
+            command,
+            logger,
+            log_path=log_root / "filter_hits.{}.log".format(sample),
+        )
+
+
+def build_filter_command(sample, prepare_root, filter_root, filter_script):
+    sample_dir = filter_root / sample
+    filtered_hits = sample_dir / "{}.filtered.tsv".format(sample)
+    input_hits = prepare_root / sample / "{}.paf_UCE_hits.tsv".format(sample)
+    return [
+            sys.executable,
+            filter_script,
+            "--input",
+            str(input_hits),
+            "--output",
+            str(filtered_hits),
+            "--trace-output",
+            str(sample_dir / "{}.decision_trace.tsv".format(sample)),
+            "--locus-output",
+            str(sample_dir / "{}.filtered.loci.tsv".format(sample)),
+            "--summary",
+            str(sample_dir / "{}.filtered.summary.txt".format(sample)),
+        ]
+
+
+def run_extract_for_samples(samples, assembly_root, filter_root, extract_root, extract_script, extract_mode, flank, logger, log_root):
+    for sample in samples:
+        sample_dir = extract_root / sample
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        detailed = sample_dir / "{}.filtered.fasta".format(sample)
+        if detailed.exists():
+            continue
+        loci = filter_root / sample / "{}.filtered.loci.tsv".format(sample)
+        contigs = assembly_root / sample / "contigs.fasta"
+        command = build_extract_command(
+            sample,
+            assembly_root,
+            filter_root,
+            extract_root,
+            extract_script,
+            extract_mode,
+            flank,
+        )
+        logger.info("Extracting UCE FASTA for {}".format(sample))
+        stream_process(
+            command,
+            logger,
+            log_path=log_root / "extract_fasta.{}.log".format(sample),
+        )
+
+
+def build_extract_command(sample, assembly_root, filter_root, extract_root, extract_script, extract_mode, flank):
+    sample_dir = extract_root / sample
+    loci = filter_root / sample / "{}.filtered.loci.tsv".format(sample)
+    contigs = assembly_root / sample / "contigs.fasta"
+    return [
+            sys.executable,
+            extract_script,
+            "--hits",
+            str(loci),
+            "--contigs",
+            str(contigs),
+            "--sample-prefix",
+            sample,
+            "--filename-prefix",
+            "{}.filtered".format(sample),
+            "--output-dir",
+            str(sample_dir),
+            "--mode",
+            extract_mode,
+            "--flank",
+            str(flank),
+            "--reverse-complement-negative",
+        ]
+
+
+def build_aggregate_command(aggregate_script, filter_root, aggregate_root, prefix):
+    return [
+        sys.executable,
+        str(aggregate_script),
+        "--input-dir",
+        str(filter_root),
+        "--output-dir",
+        str(aggregate_root),
+        "--prefix",
+        prefix,
+    ]
+
+
+def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger, log_root):
+    aggregate_root.mkdir(parents=True, exist_ok=True)
+    sqlite_path = aggregate_root / "{}.uce.sqlite".format(prefix)
+    if sqlite_path.exists():
+        return
+    command = build_aggregate_command(aggregate_script, filter_root, aggregate_root, prefix)
+    logger.info("Aggregating filtered loci across samples")
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "aggregate_loci.log",
+    )
+
+
+def print_dry_run_plan(
+    current_dir,
+    raw_dir,
+    project_id,
+    project_dir,
+    stage_dirs,
+    probes_path,
+    samples,
+    args,
+    executables,
+):
+    selected_stages = [stage for stage in range(args.start_stage, args.end_stage + 1)]
+    print("Dry run only. No commands executed.")
+    print("Current directory: {}".format(current_dir))
+    print("Project ID: {}".format(project_id))
+    print("Project directory: {}".format(project_dir))
+    print("Raw FASTQ directory: {}".format(raw_dir if raw_dir else "N/A"))
+    print("Probe FASTA: {}".format(probes_path if probes_path else "N/A"))
+    print(
+        "Selected stages: {}".format(
+            ", ".join("{}={}".format(stage, STAGE_NAMES[stage]) for stage in selected_stages)
+        )
+    )
+    print("Threads: {}".format(args.threads))
+    print("fastp threads/job: {}".format(args.fastp_threads_per_job))
+    print(
+        "fastp max concurrent jobs: {}".format(
+            concurrency_from_threads(
+                args.threads, args.fastp_threads_per_job, args.max_fastp_jobs
+            )
+        )
+    )
+    print("SPAdes threads/job: {}".format(args.spades_threads_per_job))
+    print("SPAdes memory/job (GB): {}".format(args.spades_memory_gb))
+    print(
+        "SPAdes max concurrent jobs: {}".format(
+            concurrency_from_threads(
+                args.threads, args.spades_threads_per_job, args.max_spades_jobs
+            )
+        )
+    )
+    print("Extract mode: {}".format(args.extract_mode))
+    print("Flank: {}".format(args.flank))
+    if samples:
+        print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
+    else:
+        print("Detected samples: N/A for selected stages")
+    print("")
+    print("Stage directories:")
+    for stage in selected_stages:
+        name = STAGE_NAMES[stage]
+        print("  {} -> {}".format(name, stage_dirs[name]))
+    if 0 not in selected_stages:
+        print("  00_Log -> {}".format(stage_dirs["00_Log"]))
+    print("")
+    for sample, raw_pair in samples.items():
+        print("[{}]".format(sample))
+        print("  raw R1: {}".format(raw_pair[0]))
+        print("  raw R2: {}".format(raw_pair[1]))
+        if 1 in selected_stages:
+            fastp_cmd, fastp_out = build_fastp_command(
+                sample,
+                raw_pair,
+                stage_dirs["01_Trimmed"],
+                executables["fastp"],
+                args.fastp_threads_per_job,
+            )
+            print("  fastp:")
+            print("    {}".format(format_command(fastp_cmd)))
+        else:
+            fastp_out = fastp_outputs(stage_dirs["01_Trimmed"], sample)
+        if 2 in selected_stages:
+            print("  spades:")
+            print(
+                "    {}".format(
+                    format_command(
+                        build_spades_command(
+                            sample,
+                            stage_dirs["01_Trimmed"],
+                            stage_dirs["02_Spades_assembly"],
+                            executables["spades"],
+                            args.spades_threads_per_job,
+                            args.spades_memory_gb,
+                        )
+                    )
+                )
+            )
+        if 3 in selected_stages:
+            print("  minimap2:")
+            print(
+                "    {}".format(
+                    format_command(
+                        build_alignment_command(
+                            sample,
+                            stage_dirs["02_Spades_assembly"],
+                            probes_path,
+                            executables["minimap2"],
+                            args.threads,
+                        )
+                    )
+                )
+            )
+        if 4 in selected_stages:
+            print("  prepare_uce_hits:")
+            print(
+                "    {}".format(
+                    format_command(
+                        build_prepare_command(
+                            sample,
+                            stage_dirs["03_Alignment"],
+                            stage_dirs["04_prepare_uce_hits_from_paf"],
+                            executables["prepare"],
+                            args.min_identity,
+                            args.min_coverage,
+                        )
+                    )
+                )
+            )
+        if 5 in selected_stages:
+            print("  filter_uce_hits:")
+            print(
+                "    {}".format(
+                    format_command(
+                        build_filter_command(
+                            sample,
+                            stage_dirs["04_prepare_uce_hits_from_paf"],
+                            stage_dirs["05_Filtering_uce_hits_trace"],
+                            executables["filter"],
+                        )
+                    )
+                )
+            )
+        if 6 in selected_stages:
+            print("  extract_fasta:")
+            print(
+                "    {}".format(
+                    format_command(
+                        build_extract_command(
+                            sample,
+                            stage_dirs["02_Spades_assembly"],
+                            stage_dirs["05_Filtering_uce_hits_trace"],
+                            stage_dirs["06_extract_uce_fasta_from_hits"],
+                            executables["extract"],
+                            args.extract_mode,
+                            args.flank,
+                        )
+                    )
+                )
+            )
+        print("  planned outputs:")
+        if 1 in selected_stages:
+            print("    trimmed R1: {}".format(fastp_out["r1"]))
+        if 2 in selected_stages:
+            print(
+                "    contigs: {}".format(
+                    stage_dirs["02_Spades_assembly"] / sample / "contigs.fasta"
+                )
+            )
+        if 3 in selected_stages:
+            print(
+                "    paf: {}".format(stage_dirs["03_Alignment"] / sample / "{}.paf".format(sample))
+            )
+        if 5 in selected_stages:
+            print(
+                "    loci: {}".format(
+                    stage_dirs["05_Filtering_uce_hits_trace"]
+                    / sample
+                    / "{}.filtered.loci.tsv".format(sample)
+                )
+            )
+        if 6 in selected_stages:
+            print(
+                "    fasta: {}".format(
+                    stage_dirs["06_extract_uce_fasta_from_hits"]
+                    / sample
+                    / "{}.filtered.fasta".format(sample)
+                )
+            )
+        print("")
+    if 7 in selected_stages:
+        print("[aggregate]")
+        print(
+            "  aggregate_loci:\n    {}".format(
+                format_command(
+                    build_aggregate_command(
+                        executables["aggregate"],
+                        stage_dirs["05_Filtering_uce_hits_trace"],
+                        stage_dirs["07_Aggregated_loci"],
+                        project_id,
+                    )
+                )
+            )
+        )
+        print("  planned outputs:")
+        print(
+            "    sqlite: {}".format(
+                stage_dirs["07_Aggregated_loci"] / "{}.uce.sqlite".format(project_id)
+            )
+        )
+        print(
+            "    long table: {}".format(
+                stage_dirs["07_Aggregated_loci"] / "{}.filtered.loci.tsv".format(project_id)
+            )
+        )
+        print("")
+
+
+def main():
+    args = get_args()
+    args.start_stage, args.end_stage = determine_stage_range(args)
+    if args.start_stage > args.end_stage:
+        raise RuntimeError("--start-stage cannot be greater than --end-stage.")
+    selected_stages = set(range(args.start_stage, args.end_stage + 1))
+    current_dir = Path(os.getcwd()).resolve()
+    raw_dir = resolve_raw_dir(current_dir, args.raw_dir) if selected_stages & set(range(1, 7)) else None
+    project_id, project_dir = resolve_project_path(current_dir, args.project_id, raw_dir=raw_dir)
+    project_info = read_project_info(project_dir) or {}
+    settings = resolve_pipeline_settings(args, project_info, selected_stages, current_dir)
+
+    fastp_path = require_executable(["fastp"]) if 1 in selected_stages else None
+    spades_path = require_executable(["spades.py"]) if 2 in selected_stages else None
+    minimap2_path = require_executable(["minimap2"]) if 3 in selected_stages else None
+    decompressor = shutil.which("pigz") or shutil.which("gzip")
+    if raw_dir is not None and 1 in selected_stages and decompressor is None and any(
+        path.name.lower().endswith(GZ_FASTQ_EXTENSIONS)
+        for path in raw_dir.iterdir()
+        if path.is_file()
+    ):
+        raise RuntimeError("Found .gz FASTQ files but neither pigz nor gzip is available.")
+
+    script_dir = Path(__file__).resolve().parent
+    prepare_script = script_dir / "phyluce_assembly_prepare_uce_hits_from_paf"
+    filter_script = script_dir / "phyluce_assembly_filter_uce_hits_trace"
+    extract_script = script_dir / "phyluce_assembly_extract_uce_fasta_from_hits"
+    aggregate_script = script_dir / "phyluce_assembly_aggregate_filtered_loci"
+
+    probes_path = settings["probes"]
+    samples = find_raw_fastq_pairs(raw_dir) if raw_dir is not None and selected_stages & set(range(1, 7)) else {}
+    executables = {
+        "fastp": fastp_path,
+        "spades": spades_path,
+        "minimap2": minimap2_path,
+        "prepare": prepare_script,
+        "filter": filter_script,
+        "extract": extract_script,
+        "aggregate": aggregate_script,
+    }
+
+    if args.dry_run:
+        stage_dirs = get_stage_dirs(project_dir)
+        print_dry_run_plan(
+            current_dir,
+            raw_dir,
+            project_id,
+            project_dir,
+            stage_dirs,
+            probes_path,
+            samples,
+            argparse.Namespace(**{**vars(args), **settings}),
+            executables,
+        )
+        return
+
+    project_id, project_dir = resolve_project_for_run(current_dir, project_id, args.start_stage, raw_dir=raw_dir)
+    stage_dirs = ensure_stage_dirs(project_dir)
+    logger = PipelineLogger(stage_dirs["00_Log"])
+    existing_project_info = read_project_info(project_dir) or {}
+    write_project_info(
+        project_dir,
+        OrderedDict(
+            [
+                ("project_id", project_id),
+                ("project_dir", str(project_dir)),
+                (
+                    "raw_dir",
+                    str(raw_dir)
+                    if raw_dir is not None
+                    else existing_project_info.get("raw_dir", "N/A"),
+                ),
+                ("probes", str(probes_path) if probes_path is not None else existing_project_info.get("probes", "N/A")),
+                ("threads", settings["threads"]),
+                ("fastp_threads_per_job", settings["fastp_threads_per_job"]),
+                ("max_fastp_jobs", settings["max_fastp_jobs"] if settings["max_fastp_jobs"] is not None else "auto"),
+                ("spades_threads_per_job", settings["spades_threads_per_job"]),
+                ("max_spades_jobs", settings["max_spades_jobs"] if settings["max_spades_jobs"] is not None else "auto"),
+                ("spades_memory_gb", settings["spades_memory_gb"]),
+                ("min_identity", settings["min_identity"]),
+                ("min_coverage", settings["min_coverage"]),
+                ("extract_mode", settings["extract_mode"]),
+                ("flank", settings["flank"]),
+            ]
+        ),
+    )
+    logger.save_run_config(
+        {
+            "project_id": project_id,
+            "project_dir": project_dir,
+            "raw_dir": raw_dir or "N/A",
+            "probes": probes_path or "N/A",
+            "threads": settings["threads"],
+            "fastp_threads_per_job": settings["fastp_threads_per_job"],
+            "max_fastp_jobs": settings["max_fastp_jobs"],
+            "spades_threads_per_job": settings["spades_threads_per_job"],
+            "max_spades_jobs": settings["max_spades_jobs"],
+            "spades_memory_gb": settings["spades_memory_gb"],
+            "min_identity": settings["min_identity"],
+            "min_coverage": settings["min_coverage"],
+            "extract_mode": settings["extract_mode"],
+            "flank": settings["flank"],
+            "dry_run": args.dry_run,
+            "start_stage": args.start_stage,
+            "end_stage": args.end_stage,
+            "fastp_path": fastp_path or "N/A",
+            "spades_path": spades_path or "N/A",
+            "minimap2_path": minimap2_path or "N/A",
+            "decompressor": decompressor or "none",
+            "raw_dir_source": args.raw_dir or "interactive_selection",
+            "project_id_source": args.project_id or "interactive_input",
+            "probes_source": args.probes or "auto_or_interactive_selection",
+        }
+    )
+    logger.info("Project directory: {}".format(project_dir))
+    if raw_dir is not None:
+        logger.info("Raw FASTQ directory: {}".format(raw_dir))
+    if probes_path is not None:
+        logger.info("Probe FASTA: {}".format(probes_path))
+    if raw_dir is not None and 1 in selected_stages and decompressor:
+        decompress_fastqs(raw_dir, settings["threads"], decompressor, logger, stage_dirs["00_Log"])
+    if samples:
+        logger.info("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
+    else:
+        logger.info("No sample scan required for selected stages.")
+
+    if args.start_stage <= 1 <= args.end_stage:
+        run_fastp_for_samples(
+            samples,
+            stage_dirs["01_Trimmed"],
+            fastp_path,
+            settings["threads"],
+            settings["fastp_threads_per_job"],
+            settings["max_fastp_jobs"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 2 <= args.end_stage:
+        run_spades_for_samples(
+            samples,
+            stage_dirs["01_Trimmed"],
+            stage_dirs["02_Spades_assembly"],
+            spades_path,
+            settings["threads"],
+            settings["spades_threads_per_job"],
+            settings["max_spades_jobs"],
+            settings["spades_memory_gb"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 3 <= args.end_stage:
+        run_alignment_for_samples(
+            samples,
+            stage_dirs["02_Spades_assembly"],
+            stage_dirs["03_Alignment"],
+            probes_path,
+            minimap2_path,
+            settings["threads"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 4 <= args.end_stage:
+        run_prepare_for_samples(
+            samples,
+            stage_dirs["03_Alignment"],
+            stage_dirs["04_prepare_uce_hits_from_paf"],
+            prepare_script,
+            settings["min_identity"],
+            settings["min_coverage"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 5 <= args.end_stage:
+        run_filter_for_samples(
+            samples,
+            stage_dirs["04_prepare_uce_hits_from_paf"],
+            stage_dirs["05_Filtering_uce_hits_trace"],
+            filter_script,
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 6 <= args.end_stage:
+        run_extract_for_samples(
+            samples,
+            stage_dirs["02_Spades_assembly"],
+            stage_dirs["05_Filtering_uce_hits_trace"],
+            stage_dirs["06_extract_uce_fasta_from_hits"],
+            extract_script,
+            settings["extract_mode"],
+            settings["flank"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 7 <= args.end_stage:
+        run_aggregate(
+            aggregate_script,
+            stage_dirs["05_Filtering_uce_hits_trace"],
+            stage_dirs["07_Aggregated_loci"],
+            project_id,
+            logger,
+            stage_dirs["00_Log"],
+        )
+
+    logger.info("Pipeline complete for {} samples.".format(len(samples)))
+    logger.info("Logs: {}".format(stage_dirs["00_Log"]))
+
+
+if __name__ == "__main__":
+    main()
