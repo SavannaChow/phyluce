@@ -38,3 +38,5 @@
 [2026-03-02 18:01:49] [from Darwin SavannaMacBookPro-9.local]  3257  '/Users/savannachow/Github/phyluce/phyluce_assembly_extract_uce_fasta_from_hits'
 [2026-03-02 18:02:16] [from Darwin SavannaMacBookPro-9.local]  3258  python3 ./phyluce_assembly_uce_hit_pipeline
 [2026-03-02 18:03:22] [from Darwin SavannaMacBookPro-9.local]  3259  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output-dir DGAh1 --sample-name DGAh1  --reverse-complement-negative --extract-mode full-contig 
+[2026-03-04 15:09:16] [from Darwin SavannaMacBookPro-9.local]  3278  git stash
+[2026-03-04 15:09:35] [from Darwin SavannaMacBookPro-9.local]  3279  git filter-branch --force --index-filter \n'git rm --cached --ignore-unmatch DGAh1_contigs.fasta' \n--prune-empty --tag-name-filter cat -- --all
