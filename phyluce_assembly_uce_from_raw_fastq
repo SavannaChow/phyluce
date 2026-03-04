@@ -862,6 +862,76 @@ def run_fastp_for_samples(samples, trimmed_root, fastp_path, total_threads, thre
             future.result()
 
 
+def fasta_lengths(fasta_path):
+    lengths = []
+    current = 0
+    with open(fasta_path) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current:
+                    lengths.append(current)
+                current = 0
+            else:
+                current += len(line)
+    if current:
+        lengths.append(current)
+    return lengths
+
+
+def nx_from_lengths(lengths, fraction):
+    if not lengths:
+        return 0
+    target = sum(lengths) * fraction
+    running = 0
+    for length in sorted(lengths, reverse=True):
+        running += length
+        if running >= target:
+            return length
+    return 0
+
+
+def summarize_contigs(sample, assembly_root):
+    contigs = Path(assembly_root) / sample / "contigs.fasta"
+    lengths = fasta_lengths(contigs)
+    total_size = sum(lengths)
+    return OrderedDict(
+        [
+            ("Sample", sample),
+            ("Contigs path", str(contigs)),
+            ("Total size", total_size),
+            ("Number of contigs", len(lengths)),
+            ("N50", nx_from_lengths(lengths, 0.5)),
+            ("N90", nx_from_lengths(lengths, 0.9)),
+            ("Longest contig", max(lengths) if lengths else 0),
+        ]
+    )
+
+
+def write_contig_summary(sample, assembly_root):
+    summary = summarize_contigs(sample, assembly_root)
+    sample_dir = Path(assembly_root) / sample
+    summary_path = sample_dir / "{}.contigs.summary.tsv".format(sample)
+    with open(summary_path, "w") as handle:
+        handle.write("\t".join(summary.keys()) + "\n")
+        handle.write("\t".join(str(value) for value in summary.values()) + "\n")
+    return summary
+
+
+def write_spades_summary_table(samples, assembly_root, logger):
+    summaries = [write_contig_summary(sample, assembly_root) for sample in samples]
+    if not summaries:
+        return
+    summary_path = Path(assembly_root) / "assembly_summary.tsv"
+    with open(summary_path, "w") as handle:
+        handle.write("\t".join(summaries[0].keys()) + "\n")
+        for summary in summaries:
+            handle.write("\t".join(str(value) for value in summary.values()) + "\n")
+    logger.info("Wrote SPAdes assembly summary: {}".format(summary_path))
+
+
 def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, logger, log_root):
     outputs = fastp_outputs(trimmed_root, sample)
     sample_out = assembly_root / sample
@@ -918,6 +988,7 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
         ]
         for future in concurrent.futures.as_completed(futures):
             future.result()
+    write_spades_summary_table(samples, assembly_root, logger)
 
 
 def run_alignment_for_samples(samples, assembly_root, alignment_root, probes_path, minimap2_path, threads, logger, log_root):
@@ -1268,6 +1339,13 @@ def print_dry_run_plan(
                     stage_dirs["02_Spades_assembly"] / sample / "contigs.fasta"
                 )
             )
+            print(
+                "    contig summary: {}".format(
+                    stage_dirs["02_Spades_assembly"]
+                    / sample
+                    / "{}.contigs.summary.tsv".format(sample)
+                )
+            )
         if 3 in selected_stages:
             print(
                 "    paf: {}".format(stage_dirs["03_Alignment"] / sample / "{}.paf".format(sample))
@@ -1312,6 +1390,14 @@ def print_dry_run_plan(
         print(
             "    long table: {}".format(
                 stage_dirs["07_Aggregated_loci"] / "{}.filtered.loci.tsv".format(project_id)
+            )
+        )
+        print("")
+    if 2 in selected_stages:
+        print("[spades_summary]")
+        print(
+            "  planned outputs:\n    {}".format(
+                stage_dirs["02_Spades_assembly"] / "assembly_summary.tsv"
             )
         )
         print("")
