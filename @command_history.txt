@@ -42,3 +42,9 @@
 [2026-03-04 15:09:35] [from Darwin SavannaMacBookPro-9.local]  3279  git filter-branch --force --index-filter \n'git rm --cached --ignore-unmatch DGAh1_contigs.fasta' \n--prune-empty --tag-name-filter cat -- --all
 [2026-03-04 15:11:10] [from Darwin SavannaMacBookPro-9.local]  3285  git restore @command_history.txt
 [2026-03-04 15:11:14] [from Darwin SavannaMacBookPro-9.local]  3286  git status
+[2026-03-04 15:13:04] [from Darwin SavannaMacBookPro-9.local]  3287  git filter-branch --force --index-filter \n'git rm --cached --ignore-unmatch DGAh1_contigs.fasta' \n--prune-empty --tag-name-filter cat -- --all
+[2026-03-04 15:13:11] [from Darwin SavannaMacBookPro-9.local]  3288  git push -f origin pipeline
+[2026-03-04 15:14:44] [from Darwin SavannaMacBookPro-9.local]  3289  echo "@command_history.txt" >> .gitignore
+[2026-03-04 15:14:51] [from Darwin SavannaMacBookPro-9.local]  3290  git add .gitignore
+
+[2026-03-04 15:14:56] [from Darwin SavannaMacBookPro-9.local]  3291  git commit -m "ignore command history"
