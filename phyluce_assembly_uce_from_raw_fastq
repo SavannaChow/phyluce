@@ -109,6 +109,11 @@ def get_args():
         help="Memory limit for each SPAdes job in GB. Default is 250.",
     )
     parser.add_argument(
+        "--spades-cov-cutoff",
+        default="2",
+        help="SPAdes coverage cutoff. Default is 2.",
+    )
+    parser.add_argument(
         "--min-identity",
         type=float,
         default=0.8,
@@ -555,6 +560,13 @@ def prompt_choice_with_default(message, default, choices):
         print("Please choose one of: {}".format(", ".join(choices)))
 
 
+def prompt_text_with_default(message, default):
+    if not sys.stdin.isatty():
+        return default
+    answer = input("{} [{}]: ".format(message, default)).strip()
+    return answer if answer else default
+
+
 def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     settings = {}
     saved_probes = project_info.get("probes")
@@ -640,6 +652,16 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
         args.spades_memory_gb,
         {2},
     )
+    saved_cov_cutoff = project_info.get("spades_cov_cutoff")
+    cov_cutoff_default = saved_cov_cutoff if saved_cov_cutoff not in (None, "N/A") else args.spades_cov_cutoff
+    if 2 in selected_stages and not cli_flag_present("--spades-cov-cutoff"):
+        settings["spades_cov_cutoff"] = prompt_text_with_default(
+            "SPAdes coverage cutoff", cov_cutoff_default
+        )
+    else:
+        settings["spades_cov_cutoff"] = (
+            args.spades_cov_cutoff if cli_flag_present("--spades-cov-cutoff") else cov_cutoff_default
+        )
     settings["min_identity"] = resolve_float(
         "min_identity",
         args.min_identity,
@@ -932,7 +954,7 @@ def write_spades_summary_table(samples, assembly_root, logger):
     logger.info("Wrote SPAdes assembly summary: {}".format(summary_path))
 
 
-def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, logger, log_root):
+def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff, logger, log_root):
     outputs = fastp_outputs(trimmed_root, sample)
     sample_out = assembly_root / sample
     contigs = sample_out / "contigs.fasta"
@@ -940,7 +962,7 @@ def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads
         return
     sample_out.mkdir(parents=True, exist_ok=True)
     command = build_spades_command(
-        sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb
+        sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff
     )
     logger.info("Running SPAdes for {}".format(sample))
     stream_process(
@@ -950,7 +972,7 @@ def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads
     )
 
 
-def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb):
+def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff):
     outputs = fastp_outputs(trimmed_root, sample)
     sample_out = assembly_root / sample
     return [
@@ -959,6 +981,8 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
         str(per_job_threads),
         "-m",
         str(memory_gb),
+        "--cov-cutoff",
+        str(cov_cutoff),
         "--careful",
         "-1",
         str(outputs["r1"]),
@@ -969,7 +993,7 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
     ]
 
 
-def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, logger, log_root):
+def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, logger, log_root):
     jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [
@@ -981,6 +1005,7 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
                 spades_path,
                 per_job_threads,
                 memory_gb,
+                cov_cutoff,
                 logger,
                 log_root,
             )
@@ -1215,6 +1240,7 @@ def print_dry_run_plan(
     )
     print("SPAdes threads/job: {}".format(args.spades_threads_per_job))
     print("SPAdes memory/job (GB): {}".format(args.spades_memory_gb))
+    print("SPAdes cov-cutoff: {}".format(args.spades_cov_cutoff))
     print(
         "SPAdes max concurrent jobs: {}".format(
             concurrency_from_threads(
@@ -1264,6 +1290,7 @@ def print_dry_run_plan(
                             executables["spades"],
                             args.spades_threads_per_job,
                             args.spades_memory_gb,
+                            args.spades_cov_cutoff,
                         )
                     )
                 )
@@ -1482,6 +1509,7 @@ def main():
                 ("spades_threads_per_job", settings["spades_threads_per_job"]),
                 ("max_spades_jobs", settings["max_spades_jobs"] if settings["max_spades_jobs"] is not None else "auto"),
                 ("spades_memory_gb", settings["spades_memory_gb"]),
+                ("spades_cov_cutoff", settings["spades_cov_cutoff"]),
                 ("min_identity", settings["min_identity"]),
                 ("min_coverage", settings["min_coverage"]),
                 ("extract_mode", settings["extract_mode"]),
@@ -1501,6 +1529,7 @@ def main():
             "spades_threads_per_job": settings["spades_threads_per_job"],
             "max_spades_jobs": settings["max_spades_jobs"],
             "spades_memory_gb": settings["spades_memory_gb"],
+            "spades_cov_cutoff": settings["spades_cov_cutoff"],
             "min_identity": settings["min_identity"],
             "min_coverage": settings["min_coverage"],
             "extract_mode": settings["extract_mode"],
@@ -1550,6 +1579,7 @@ def main():
             settings["spades_threads_per_job"],
             settings["max_spades_jobs"],
             settings["spades_memory_gb"],
+            settings["spades_cov_cutoff"],
             logger,
             stage_dirs["00_Log"],
         )
