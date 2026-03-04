@@ -40,3 +40,5 @@
 [2026-03-02 18:03:22] [from Darwin SavannaMacBookPro-9.local]  3259  python3 ./phyluce_assembly_uce_hit_pipeline --paf ./DGAh1_output.paf --contigs ./DGAh1_contigs.fasta --output-dir DGAh1 --sample-name DGAh1  --reverse-complement-negative --extract-mode full-contig 
 [2026-03-04 15:09:16] [from Darwin SavannaMacBookPro-9.local]  3278  git stash
 [2026-03-04 15:09:35] [from Darwin SavannaMacBookPro-9.local]  3279  git filter-branch --force --index-filter \n'git rm --cached --ignore-unmatch DGAh1_contigs.fasta' \n--prune-empty --tag-name-filter cat -- --all
+[2026-03-04 15:11:10] [from Darwin SavannaMacBookPro-9.local]  3285  git restore @command_history.txt
+[2026-03-04 15:11:14] [from Darwin SavannaMacBookPro-9.local]  3286  git status
