@@ -193,6 +193,7 @@ class PipelineLogger:
         self.write(self.pipeline_log, line)
 
     def command(self, command, cwd=None, log_path=None):
+        command = [str(part) for part in command]
         line = "[{}] CMD cwd={} :: {}".format(
             timestamp(),
             cwd or os.getcwd(),
@@ -216,6 +217,7 @@ class PipelineLogger:
 
 
 def stream_process(command, logger, stdout_path=None, cwd=None, log_path=None):
+    command = [str(part) for part in command]
     logger.command(command, cwd=cwd, log_path=log_path)
     if stdout_path is not None:
         stdout_handle = open(stdout_path, "w")
@@ -258,7 +260,7 @@ def stream_process(command, logger, stdout_path=None, cwd=None, log_path=None):
 
 
 def format_command(command):
-    return " ".join(shlex.quote(part) for part in command)
+    return " ".join(shlex.quote(str(part)) for part in command)
 
 
 def get_stage_dirs(workdir):
@@ -767,6 +769,28 @@ def find_raw_fastq_pairs(workdir):
     return {sample: (reads["1"], reads["2"]) for sample, reads in sorted(pairs.items())}
 
 
+def find_samples_from_assembly(assembly_root, strict=True):
+    assembly_root = Path(assembly_root)
+    if not assembly_root.is_dir():
+        if strict:
+            raise RuntimeError("Assembly directory not found: {}".format(assembly_root))
+        return {}
+    samples = {}
+    for sample_dir in sorted(assembly_root.iterdir()):
+        if not sample_dir.is_dir() or sample_dir.name.startswith("."):
+            continue
+        contigs = sample_dir / "contigs.fasta"
+        if contigs.is_file():
+            samples[sample_dir.name] = None
+    if not samples and strict:
+        raise RuntimeError(
+            "No sample contigs found under {} (expect <sample>/contigs.fasta).".format(
+                assembly_root
+            )
+        )
+    return samples
+
+
 def choose_probe_fasta(workdir, probes_arg):
     if probes_arg:
         path = Path(probes_arg).expanduser().resolve()
@@ -1264,8 +1288,9 @@ def print_dry_run_plan(
     print("")
     for sample, raw_pair in samples.items():
         print("[{}]".format(sample))
-        print("  raw R1: {}".format(raw_pair[0]))
-        print("  raw R2: {}".format(raw_pair[1]))
+        if raw_pair is not None:
+            print("  raw R1: {}".format(raw_pair[0]))
+            print("  raw R2: {}".format(raw_pair[1]))
         if 1 in selected_stages:
             fastp_cmd, fastp_out = build_fastp_command(
                 sample,
@@ -1436,8 +1461,10 @@ def main():
     if args.start_stage > args.end_stage:
         raise RuntimeError("--start-stage cannot be greater than --end-stage.")
     selected_stages = set(range(args.start_stage, args.end_stage + 1))
+    need_raw_samples = bool(selected_stages & {1, 2})
+    need_assembly_samples = bool(selected_stages & {3, 4, 5, 6})
     current_dir = Path(os.getcwd()).resolve()
-    raw_dir = resolve_raw_dir(current_dir, args.raw_dir) if selected_stages & set(range(1, 7)) else None
+    raw_dir = resolve_raw_dir(current_dir, args.raw_dir) if need_raw_samples else None
     project_id, project_dir = resolve_project_path(current_dir, args.project_id, raw_dir=raw_dir)
     project_info = read_project_info(project_dir) or {}
     settings = resolve_pipeline_settings(args, project_info, selected_stages, current_dir)
@@ -1460,7 +1487,13 @@ def main():
     aggregate_script = script_dir / "phyluce_assembly_aggregate_filtered_loci"
 
     probes_path = settings["probes"]
-    samples = find_raw_fastq_pairs(raw_dir) if raw_dir is not None and selected_stages & set(range(1, 7)) else {}
+    if need_raw_samples:
+        samples = find_raw_fastq_pairs(raw_dir)
+    elif need_assembly_samples:
+        assembly_root = project_dir / "02_Spades_assembly"
+        samples = find_samples_from_assembly(assembly_root, strict=not args.dry_run)
+    else:
+        samples = {}
     executables = {
         "fastp": fastp_path,
         "spades": spades_path,

@@ -48,3 +48,8 @@
 [2026-03-04 15:14:51] [from Darwin SavannaMacBookPro-9.local]  3290  git add .gitignore
 
 [2026-03-04 15:14:56] [from Darwin SavannaMacBookPro-9.local]  3291  git commit -m "ignore command history"
+[2026-03-12 14:39:09] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
+[2026-03-12 14:39:09] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
+[2026-03-12 14:41:15] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
+[2026-03-12 14:41:15] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
+[2026-03-12 14:41:15] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
