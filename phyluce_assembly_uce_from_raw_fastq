@@ -140,6 +140,14 @@ def get_args():
         help="Flanking bases to add on each side when --extract-mode slice is used.",
     )
     parser.add_argument(
+        "--locus-thresholds",
+        default="1.0",
+        help=(
+            "Comma-separated minimum sample proportions for stage 8 export, "
+            "e.g. '1.0,0.9,0.75'."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -699,6 +707,23 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     else:
         settings["flank"] = flank_default
 
+    saved_locus_thresholds = project_info.get("locus_thresholds")
+    locus_thresholds_default = (
+        saved_locus_thresholds
+        if saved_locus_thresholds not in (None, "N/A")
+        else args.locus_thresholds
+    )
+    if 8 in selected_stages and not cli_flag_present("--locus-thresholds"):
+        settings["locus_thresholds"] = prompt_text_with_default(
+            "Stage 8 locus thresholds", locus_thresholds_default
+        )
+    else:
+        settings["locus_thresholds"] = (
+            args.locus_thresholds
+            if cli_flag_present("--locus-thresholds")
+            else locus_thresholds_default
+        )
+
     return settings
 
 
@@ -1218,7 +1243,7 @@ def build_aggregate_command(aggregate_script, filter_root, aggregate_root, prefi
     ]
 
 
-def build_export_locus_fastas_command(export_script, aggregate_root, extract_root, output_root, prefix):
+def build_export_locus_fastas_command(export_script, aggregate_root, extract_root, output_root, prefix, thresholds):
     return [
         sys.executable,
         str(export_script),
@@ -1228,6 +1253,8 @@ def build_export_locus_fastas_command(export_script, aggregate_root, extract_roo
         str(extract_root),
         "--output-dir",
         str(output_root),
+        "--thresholds",
+        str(thresholds),
     ]
 
 
@@ -1245,13 +1272,10 @@ def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger,
     )
 
 
-def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_root, prefix, logger, log_root):
+def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_root, prefix, thresholds, logger, log_root):
     output_root.mkdir(parents=True, exist_ok=True)
-    summary_path = output_root / "locus_fasta_summary.tsv"
-    if summary_path.exists():
-        return
     command = build_export_locus_fastas_command(
-        export_script, aggregate_root, extract_root, output_root, prefix
+        export_script, aggregate_root, extract_root, output_root, prefix, thresholds
     )
     logger.info("Exporting one FASTA per UCE locus")
     stream_process(
@@ -1305,6 +1329,7 @@ def print_dry_run_plan(
     )
     print("Extract mode: {}".format(args.extract_mode))
     print("Flank: {}".format(args.flank))
+    print("Stage 8 locus thresholds: {}".format(args.locus_thresholds))
     if samples:
         print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
     else:
@@ -1487,19 +1512,20 @@ def print_dry_run_plan(
                         stage_dirs["06_extract_uce_fasta_from_hits"],
                         stage_dirs["08_Export_Locus_FASTAs"],
                         project_id,
+                        args.locus_thresholds,
                     )
                 )
             )
         )
         print("  planned outputs:")
         print(
-            "    loci dir: {}".format(
-                stage_dirs["08_Export_Locus_FASTAs"] / "loci"
+            "    summary: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "threshold_summary.tsv"
             )
         )
         print(
-            "    summary: {}".format(
-                stage_dirs["08_Export_Locus_FASTAs"] / "locus_fasta_summary.tsv"
+            "    all-threshold summary: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "all_thresholds_locus_fasta_summary.tsv"
             )
         )
         print("")
@@ -1607,6 +1633,7 @@ def main():
                 ("min_coverage", settings["min_coverage"]),
                 ("extract_mode", settings["extract_mode"]),
                 ("flank", settings["flank"]),
+                ("locus_thresholds", settings["locus_thresholds"]),
             ]
         ),
     )
@@ -1627,6 +1654,7 @@ def main():
             "min_coverage": settings["min_coverage"],
             "extract_mode": settings["extract_mode"],
             "flank": settings["flank"],
+            "locus_thresholds": settings["locus_thresholds"],
             "dry_run": args.dry_run,
             "start_stage": args.start_stage,
             "end_stage": args.end_stage,
@@ -1735,6 +1763,7 @@ def main():
             stage_dirs["06_extract_uce_fasta_from_hits"],
             stage_dirs["08_Export_Locus_FASTAs"],
             project_id,
+            settings["locus_thresholds"],
             logger,
             stage_dirs["00_Log"],
         )

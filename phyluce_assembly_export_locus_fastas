@@ -47,6 +47,14 @@ def get_args():
         default=".filtered.fasta",
         help="Filename suffix used for per-sample FASTA files in --extract-dir.",
     )
+    parser.add_argument(
+        "--thresholds",
+        default="1.0",
+        help=(
+            "Comma-separated minimum sample proportions to export, e.g. "
+            "'1.0,0.9,0.75'. 1.0 corresponds to a complete matrix."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -68,6 +76,29 @@ def load_aggregated_loci(path):
     if not rows:
         raise RuntimeError("No loci rows found in {}".format(path))
     return rows
+
+
+def parse_thresholds(text):
+    thresholds = []
+    seen = set()
+    for item in text.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        threshold = float(value)
+        if threshold <= 0 or threshold > 1:
+            raise RuntimeError(
+                "Threshold values must be > 0 and <= 1. Invalid value: {}".format(
+                    value
+                )
+            )
+        key = round(threshold, 6)
+        if key not in seen:
+            seen.add(key)
+            thresholds.append(threshold)
+    if not thresholds:
+        raise RuntimeError("No valid thresholds were provided.")
+    return sorted(thresholds, reverse=True)
 
 
 def parse_fasta(path):
@@ -123,51 +154,109 @@ def build_sequence_index(extract_dir, suffix):
     return index
 
 
-def write_locus_fastas(rows, sequence_index, output_dir):
+def threshold_label(threshold):
+    if abs(threshold - 1.0) < 1e-9:
+        return "complete_matrix"
+    return "coverage_{:03d}".format(int(round(threshold * 100)))
+
+
+def read_summary(path):
+    if not Path(path).is_file():
+        return []
+    with open(path, newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def read_threshold_summary(path):
+    if not Path(path).is_file():
+        return []
+    with open(path, newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def write_locus_fastas(rows, sequence_index, output_dir, thresholds):
     grouped = defaultdict(list)
     for row in rows:
         grouped[row["uce_locus"]].append(row["sample_id"])
 
     output_root = Path(output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    loci_root = output_root / "loci"
-    loci_root.mkdir(parents=True, exist_ok=True)
+    total_samples = len({row["sample_id"] for row in rows})
+    all_summary_rows = read_summary(output_root / "all_thresholds_locus_fasta_summary.tsv")
+    threshold_summary_rows = read_threshold_summary(output_root / "threshold_summary.tsv")
+    existing_threshold_labels = {
+        row["threshold_label"] for row in threshold_summary_rows
+    }
 
-    summary_rows = []
-    for locus in sorted(grouped):
-        samples = sorted(grouped[locus])
-        found = []
-        missing = []
-        for sample_id in samples:
-            key = (sample_id, locus)
-            sequence = sequence_index.get(key)
-            if sequence is None:
-                missing.append(sample_id)
-            else:
-                found.append((sample_id, sequence))
-        fasta_path = loci_root / "{}.fasta".format(locus)
-        with open(fasta_path, "w") as handle:
-            for sample_id, sequence in found:
-                handle.write(">{}\n".format(sample_id))
-                handle.write("{}\n".format(sequence))
-        summary_rows.append(
+    for threshold in thresholds:
+        kept = 0
+        label = threshold_label(threshold)
+        threshold_dir = output_root / label
+        if label in existing_threshold_labels:
+            continue
+        loci_root = threshold_dir / "loci"
+        loci_root.mkdir(parents=True, exist_ok=True)
+        summary_rows = []
+        for locus in sorted(grouped):
+            samples = sorted(grouped[locus])
+            present_proportion = len(samples) / float(total_samples) if total_samples else 0.0
+            if present_proportion + 1e-12 < threshold:
+                continue
+            found = []
+            missing = []
+            for sample_id in samples:
+                key = (sample_id, locus)
+                sequence = sequence_index.get(key)
+                if sequence is None:
+                    missing.append(sample_id)
+                else:
+                    found.append((sample_id, sequence))
+            fasta_path = loci_root / "{}.fasta".format(locus)
+            with open(fasta_path, "w") as handle:
+                for sample_id, sequence in found:
+                    handle.write(">{}\n".format(sample_id))
+                    handle.write("{}\n".format(sequence))
+            summary_rows.append(
+                {
+                    "threshold": "{:.4f}".format(threshold),
+                    "threshold_label": label,
+                    "uce_locus": locus,
+                    "samples_in_aggregate": len(samples),
+                    "total_samples": total_samples,
+                    "sample_proportion": "{:.4f}".format(present_proportion),
+                    "sequences_written": len(found),
+                    "missing_sequences": len(missing),
+                    "sample_ids_present": ",".join(sample for sample, _ in found),
+                    "sample_ids_missing": ",".join(missing),
+                    "fasta_path": str(fasta_path),
+                }
+            )
+            kept += 1
+        summary_path = threshold_dir / "locus_fasta_summary.tsv"
+        write_summary(summary_path, summary_rows)
+        all_summary_rows.extend(summary_rows)
+        threshold_summary_rows.append(
             {
-                "uce_locus": locus,
-                "samples_in_aggregate": len(samples),
-                "sequences_written": len(found),
-                "missing_sequences": len(missing),
-                "sample_ids_present": ",".join(sample for sample, _ in found),
-                "sample_ids_missing": ",".join(missing),
-                "fasta_path": str(fasta_path),
+                "threshold": "{:.4f}".format(threshold),
+                "threshold_label": label,
+                "loci_kept": kept,
+                "output_dir": str(threshold_dir),
+                "summary_path": str(summary_path),
             }
         )
-    return summary_rows
+    all_summary_rows.sort(key=lambda row: (row["threshold_label"], row["uce_locus"]))
+    threshold_summary_rows.sort(key=lambda row: row["threshold_label"])
+    return all_summary_rows, threshold_summary_rows
 
 
 def write_summary(path, rows):
     fieldnames = [
+        "threshold",
+        "threshold_label",
         "uce_locus",
         "samples_in_aggregate",
+        "total_samples",
+        "sample_proportion",
         "sequences_written",
         "missing_sequences",
         "sample_ids_present",
@@ -181,19 +270,40 @@ def write_summary(path, rows):
             writer.writerow(row)
 
 
+def write_threshold_summary(path, rows):
+    fieldnames = [
+        "threshold",
+        "threshold_label",
+        "loci_kept",
+        "output_dir",
+        "summary_path",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 def main():
     args = get_args()
     rows = load_aggregated_loci(args.aggregated_loci)
+    thresholds = parse_thresholds(args.thresholds)
     sequence_index = build_sequence_index(args.extract_dir, args.sample_fasta_suffix)
-    summary_rows = write_locus_fastas(rows, sequence_index, args.output_dir)
-    summary_path = Path(args.output_dir).resolve() / "locus_fasta_summary.tsv"
+    summary_rows, threshold_summary_rows = write_locus_fastas(
+        rows, sequence_index, args.output_dir, thresholds
+    )
+    summary_path = Path(args.output_dir).resolve() / "all_thresholds_locus_fasta_summary.tsv"
+    threshold_summary_path = Path(args.output_dir).resolve() / "threshold_summary.tsv"
     write_summary(summary_path, summary_rows)
+    write_threshold_summary(threshold_summary_path, threshold_summary_rows)
     print(
-        "Exported {} locus FASTA files to {}".format(
-            len(summary_rows), Path(args.output_dir).resolve() / "loci"
+        "Exported locus FASTA files for {} thresholds under {}".format(
+            len(thresholds), Path(args.output_dir).resolve()
         )
     )
     print("summary\t{}".format(summary_path))
+    print("threshold_summary\t{}".format(threshold_summary_path))
 
 
 if __name__ == "__main__":
