@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Align per-locus FASTA files with MAFFT using phyluce-compatible "
+            "parameters."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        required=True,
+        help="Stage 08 directory containing threshold subdirectories.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory for aligned locus FASTA outputs.",
+    )
+    parser.add_argument(
+        "--thresholds",
+        default=None,
+        help=(
+            "Optional comma-separated threshold labels or values to align, e.g. "
+            "'complete_matrix,coverage_090' or '1.0,0.9'. Defaults to all "
+            "thresholds found in --input-dir."
+        ),
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Maximum number of parallel MAFFT jobs.",
+    )
+    return parser.parse_args()
+
+
+def threshold_label_from_value(value):
+    threshold = float(value)
+    if threshold <= 0 or threshold > 1:
+        raise RuntimeError("Threshold values must be > 0 and <= 1: {}".format(value))
+    if abs(threshold - 1.0) < 1e-9:
+        return "complete_matrix"
+    return "coverage_{:03d}".format(int(round(threshold * 100)))
+
+
+def resolve_threshold_labels(input_dir, thresholds_text):
+    input_root = Path(input_dir).resolve()
+    if thresholds_text:
+        labels = []
+        for item in thresholds_text.split(","):
+            value = item.strip()
+            if not value:
+                continue
+            if value.startswith("coverage_") or value == "complete_matrix":
+                labels.append(value)
+            else:
+                labels.append(threshold_label_from_value(value))
+        if not labels:
+            raise RuntimeError("No valid thresholds were provided.")
+        return labels
+
+    labels = []
+    for path in sorted(input_root.iterdir()):
+        if not path.is_dir():
+            continue
+        if (path / "loci").is_dir():
+            labels.append(path.name)
+    if not labels:
+        raise RuntimeError("No threshold directories with loci/ found under {}".format(input_root))
+    return labels
+
+
+def discover_locus_fastas(input_dir, threshold_label):
+    loci_dir = Path(input_dir).resolve() / threshold_label / "loci"
+    if not loci_dir.is_dir():
+        raise RuntimeError("Missing loci directory: {}".format(loci_dir))
+    fasta_files = sorted(loci_dir.glob("*.fasta"))
+    if not fasta_files:
+        raise RuntimeError("No locus FASTA files found under {}".format(loci_dir))
+    return fasta_files
+
+
+def run_mafft(input_fasta, output_fasta):
+    command = [
+        "mafft",
+        "--adjustdirection",
+        "--maxiterate",
+        "1000",
+        str(input_fasta),
+    ]
+    process = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise RuntimeError(
+            "MAFFT failed for {}:\n{}".format(input_fasta, process.stderr.strip())
+        )
+    with open(output_fasta, "w") as handle:
+        handle.write(process.stdout)
+    return process.stderr
+
+
+def align_threshold(input_dir, output_dir, threshold_label, jobs):
+    fasta_files = discover_locus_fastas(input_dir, threshold_label)
+    threshold_output = Path(output_dir).resolve() / threshold_label
+    alignments_dir = threshold_output / "alignments"
+    alignments_dir.mkdir(parents=True, exist_ok=True)
+
+    summary_rows = []
+    pending = []
+    for fasta_path in fasta_files:
+        output_path = alignments_dir / fasta_path.name
+        if output_path.exists():
+            summary_rows.append(
+                {
+                    "threshold_label": threshold_label,
+                    "uce_locus": fasta_path.stem,
+                    "input_fasta": str(fasta_path),
+                    "output_fasta": str(output_path),
+                    "status": "existing",
+                }
+            )
+        else:
+            pending.append((fasta_path, output_path))
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
+        futures = {
+            executor.submit(run_mafft, fasta_path, output_path): (fasta_path, output_path)
+            for fasta_path, output_path in pending
+        }
+        for future in as_completed(futures):
+            fasta_path, output_path = futures[future]
+            future.result()
+            summary_rows.append(
+                {
+                    "threshold_label": threshold_label,
+                    "uce_locus": fasta_path.stem,
+                    "input_fasta": str(fasta_path),
+                    "output_fasta": str(output_path),
+                    "status": "aligned",
+                }
+            )
+
+    summary_rows.sort(key=lambda row: row["uce_locus"])
+    return summary_rows
+
+
+def write_alignment_summary(path, rows):
+    fieldnames = [
+        "threshold_label",
+        "uce_locus",
+        "input_fasta",
+        "output_fasta",
+        "status",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def write_threshold_summary(path, rows):
+    fieldnames = [
+        "threshold_label",
+        "aligned_files",
+        "existing_files",
+        "total_files",
+        "output_dir",
+        "summary_path",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def main():
+    args = get_args()
+    threshold_labels = resolve_threshold_labels(args.input_dir, args.thresholds)
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    all_rows = []
+    threshold_rows = []
+    for threshold_label in threshold_labels:
+        summary_rows = align_threshold(args.input_dir, args.output_dir, threshold_label, args.jobs)
+        threshold_dir = output_root / threshold_label
+        summary_path = threshold_dir / "alignment_summary.tsv"
+        write_alignment_summary(summary_path, summary_rows)
+        all_rows.extend(summary_rows)
+        aligned = sum(1 for row in summary_rows if row["status"] == "aligned")
+        existing = sum(1 for row in summary_rows if row["status"] == "existing")
+        threshold_rows.append(
+            {
+                "threshold_label": threshold_label,
+                "aligned_files": aligned,
+                "existing_files": existing,
+                "total_files": len(summary_rows),
+                "output_dir": str(threshold_dir),
+                "summary_path": str(summary_path),
+            }
+        )
+
+    write_alignment_summary(
+        output_root / "all_thresholds_alignment_manifest.tsv", all_rows
+    )
+    write_threshold_summary(output_root / "threshold_manifest.tsv", threshold_rows)
+    print("Aligned locus FASTA files for {} thresholds under {}".format(len(threshold_labels), output_root))
+    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+
+
+if __name__ == "__main__":
+    main()

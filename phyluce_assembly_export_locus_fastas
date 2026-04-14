@@ -182,8 +182,12 @@ def write_locus_fastas(rows, sequence_index, output_dir, thresholds):
     output_root = Path(output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     total_samples = len({row["sample_id"] for row in rows})
-    all_summary_rows = read_summary(output_root / "all_thresholds_locus_fasta_summary.tsv")
-    threshold_summary_rows = read_threshold_summary(output_root / "threshold_summary.tsv")
+    all_summary_rows = read_summary(
+        output_root / "all_thresholds_locus_fasta_manifest.tsv"
+    ) or read_summary(output_root / "all_thresholds_locus_fasta_summary.tsv")
+    threshold_summary_rows = read_threshold_summary(
+        output_root / "threshold_manifest.tsv"
+    ) or read_threshold_summary(output_root / "threshold_summary.tsv")
     existing_threshold_labels = {
         row["threshold_label"] for row in threshold_summary_rows
     }
@@ -234,6 +238,7 @@ def write_locus_fastas(rows, sequence_index, output_dir, thresholds):
             kept += 1
         summary_path = threshold_dir / "locus_fasta_summary.tsv"
         write_summary(summary_path, summary_rows)
+        write_summary(output_root / "{}.locus_fasta_summary.tsv".format(label), summary_rows)
         all_summary_rows.extend(summary_rows)
         threshold_summary_rows.append(
             {
@@ -293,8 +298,10 @@ def main():
     summary_rows, threshold_summary_rows = write_locus_fastas(
         rows, sequence_index, args.output_dir, thresholds
     )
-    summary_path = Path(args.output_dir).resolve() / "all_thresholds_locus_fasta_summary.tsv"
-    threshold_summary_path = Path(args.output_dir).resolve() / "threshold_summary.tsv"
+    summary_path = (
+        Path(args.output_dir).resolve() / "all_thresholds_locus_fasta_manifest.tsv"
+    )
+    threshold_summary_path = Path(args.output_dir).resolve() / "threshold_manifest.tsv"
     write_summary(summary_path, summary_rows)
     write_threshold_summary(threshold_summary_path, threshold_summary_rows)
     print(
@@ -302,8 +309,8 @@ def main():
             len(thresholds), Path(args.output_dir).resolve()
         )
     )
-    print("summary\t{}".format(summary_path))
-    print("threshold_summary\t{}".format(threshold_summary_path))
+    print("manifest\t{}".format(summary_path))
+    print("threshold_manifest\t{}".format(threshold_summary_path))
 
 
 if __name__ == "__main__":

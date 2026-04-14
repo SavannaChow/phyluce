@@ -27,10 +27,11 @@ STAGE_NAMES = {
     6: "06_extract_uce_fasta_from_hits",
     7: "07_Aggregated_loci",
     8: "08_Export_Locus_FASTAs",
+    9: "09_Aligned_Locus_FASTAs",
 }
 PROJECT_INFO_NAME = "project.info"
 INTERACTIVE_ACTIONS = {
-    "f": ("full", "Run full pipeline (01-07)"),
+    "f": ("full", "Run full pipeline (01-09)"),
     "1": ("stage1", "Run 01: Trim reads with fastp"),
     "2": ("stage2", "Run 02: Assemble contigs with SPAdes"),
     "3": ("stage3", "Run 03: Align UCE probes to contigs with minimap2"),
@@ -39,6 +40,7 @@ INTERACTIVE_ACTIONS = {
     "6": ("stage6", "Run 06: Extract UCE FASTA from filtered loci"),
     "7": ("stage7", "Run 07: Aggregate all filtered loci tables"),
     "8": ("stage8", "Run 08: Export one FASTA per UCE locus"),
+    "9": ("stage9", "Run 09: Align per-locus FASTA files with MAFFT"),
 }
 
 
@@ -148,6 +150,15 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--align-thresholds",
+        default=None,
+        help=(
+            "Comma-separated threshold labels or values for stage 9 alignment, "
+            "e.g. 'complete_matrix,coverage_090' or '1.0,0.9'. Defaults to all "
+            "thresholds already present under stage 08."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -159,14 +170,14 @@ def get_args():
     parser.add_argument(
         "--start-stage",
         type=int,
-        choices=range(1, 9),
+        choices=range(1, 10),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA, 9=Align per-locus FASTA.",
     )
     parser.add_argument(
         "--end-stage",
         type=int,
-        choices=range(1, 9),
+        choices=range(1, 10),
         default=None,
         help="Stage number to end at.",
     )
@@ -345,14 +356,14 @@ def choose_action_interactively():
         )
     print("Choose workflow action:")
     print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
-    for key in ("1", "2", "3", "4", "5", "6", "7", "8"):
+    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f or 1-8): ").strip().lower()
+        answer = input("Enter choice (f or 1-9): ").strip().lower()
         if answer in INTERACTIVE_ACTIONS:
             key = INTERACTIVE_ACTIONS[answer][0]
             if key == "full":
-                return 1, 8
+                return 1, 9
             return int(key.replace("stage", "")), int(key.replace("stage", ""))
         print("Invalid choice.")
 
@@ -432,7 +443,7 @@ def infer_legacy_project_dir(current_dir, raw_dir):
     candidate = Path(current_dir) / Path(raw_dir).name
     if not candidate.is_dir():
         return None, None
-    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8)):
+    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)):
         return candidate.name, candidate
     return None, None
 
@@ -507,7 +518,7 @@ def determine_stage_range(args):
     if args.start_stage is None and args.end_stage is None:
         if sys.stdin.isatty():
             return choose_action_interactively()
-        return 1, 7
+        return 1, 9
     if args.start_stage is None and args.end_stage is not None:
         return args.end_stage, args.end_stage
     if args.start_stage is not None and args.end_stage is None:
@@ -722,6 +733,24 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
             args.locus_thresholds
             if cli_flag_present("--locus-thresholds")
             else locus_thresholds_default
+        )
+
+    saved_align_thresholds = project_info.get("align_thresholds")
+    align_thresholds_default = (
+        saved_align_thresholds
+        if saved_align_thresholds not in (None, "N/A")
+        else (args.align_thresholds if args.align_thresholds is not None else "all")
+    )
+    if 9 in selected_stages and not cli_flag_present("--align-thresholds"):
+        settings["align_thresholds"] = prompt_text_with_default(
+            "Stage 9 thresholds (all or comma-separated values/labels)",
+            align_thresholds_default,
+        )
+    else:
+        settings["align_thresholds"] = (
+            args.align_thresholds
+            if cli_flag_present("--align-thresholds")
+            else align_thresholds_default
         )
 
     return settings
@@ -1258,6 +1287,22 @@ def build_export_locus_fastas_command(export_script, aggregate_root, extract_roo
     ]
 
 
+def build_align_locus_fastas_command(align_script, input_root, output_root, thresholds, jobs):
+    command = [
+        sys.executable,
+        str(align_script),
+        "--input-dir",
+        str(input_root),
+        "--output-dir",
+        str(output_root),
+        "--jobs",
+        str(jobs),
+    ]
+    if thresholds and str(thresholds).strip().lower() != "all":
+        command.extend(["--thresholds", str(thresholds)])
+    return command
+
+
 def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger, log_root):
     aggregate_root.mkdir(parents=True, exist_ok=True)
     sqlite_path = aggregate_root / "{}.uce.sqlite".format(prefix)
@@ -1282,6 +1327,19 @@ def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_
         command,
         logger,
         log_path=log_root / "export_locus_fastas.log",
+    )
+
+
+def run_align_locus_fastas(align_script, input_root, output_root, thresholds, jobs, logger, log_root):
+    output_root.mkdir(parents=True, exist_ok=True)
+    command = build_align_locus_fastas_command(
+        align_script, input_root, output_root, thresholds, jobs
+    )
+    logger.info("Aligning per-locus FASTA files with MAFFT")
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "align_locus_fastas.log",
     )
 
 
@@ -1330,6 +1388,7 @@ def print_dry_run_plan(
     print("Extract mode: {}".format(args.extract_mode))
     print("Flank: {}".format(args.flank))
     print("Stage 8 locus thresholds: {}".format(args.locus_thresholds))
+    print("Stage 9 align thresholds: {}".format(args.align_thresholds))
     if samples:
         print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
     else:
@@ -1519,13 +1578,40 @@ def print_dry_run_plan(
         )
         print("  planned outputs:")
         print(
-            "    summary: {}".format(
-                stage_dirs["08_Export_Locus_FASTAs"] / "threshold_summary.tsv"
+            "    threshold manifest: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "threshold_manifest.tsv"
             )
         )
         print(
-            "    all-threshold summary: {}".format(
-                stage_dirs["08_Export_Locus_FASTAs"] / "all_thresholds_locus_fasta_summary.tsv"
+            "    all-threshold manifest: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "all_thresholds_locus_fasta_manifest.tsv"
+            )
+        )
+        print("")
+    if 9 in selected_stages:
+        print("[align_locus_fastas]")
+        print(
+            "  align_locus_fastas:\n    {}".format(
+                format_command(
+                    build_align_locus_fastas_command(
+                        executables["align_locus_fastas"],
+                        stage_dirs["08_Export_Locus_FASTAs"],
+                        stage_dirs["09_Aligned_Locus_FASTAs"],
+                        args.align_thresholds,
+                        args.threads,
+                    )
+                )
+            )
+        )
+        print("  planned outputs:")
+        print(
+            "    threshold manifest: {}".format(
+                stage_dirs["09_Aligned_Locus_FASTAs"] / "threshold_manifest.tsv"
+            )
+        )
+        print(
+            "    all-threshold manifest: {}".format(
+                stage_dirs["09_Aligned_Locus_FASTAs"] / "all_thresholds_alignment_manifest.tsv"
             )
         )
         print("")
@@ -1570,6 +1656,7 @@ def main():
     extract_script = script_dir / "phyluce_assembly_extract_uce_fasta_from_hits"
     aggregate_script = script_dir / "phyluce_assembly_aggregate_filtered_loci"
     export_locus_fastas_script = script_dir / "phyluce_assembly_export_locus_fastas"
+    align_locus_fastas_script = script_dir / "phyluce_assembly_align_locus_fastas"
 
     probes_path = settings["probes"]
     if need_raw_samples:
@@ -1588,6 +1675,7 @@ def main():
         "extract": extract_script,
         "aggregate": aggregate_script,
         "export_locus_fastas": export_locus_fastas_script,
+        "align_locus_fastas": align_locus_fastas_script,
     }
 
     if args.dry_run:
@@ -1634,6 +1722,7 @@ def main():
                 ("extract_mode", settings["extract_mode"]),
                 ("flank", settings["flank"]),
                 ("locus_thresholds", settings["locus_thresholds"]),
+                ("align_thresholds", settings["align_thresholds"]),
             ]
         ),
     )
@@ -1655,6 +1744,7 @@ def main():
             "extract_mode": settings["extract_mode"],
             "flank": settings["flank"],
             "locus_thresholds": settings["locus_thresholds"],
+            "align_thresholds": settings["align_thresholds"],
             "dry_run": args.dry_run,
             "start_stage": args.start_stage,
             "end_stage": args.end_stage,
@@ -1764,6 +1854,16 @@ def main():
             stage_dirs["08_Export_Locus_FASTAs"],
             project_id,
             settings["locus_thresholds"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 9 <= args.end_stage:
+        run_align_locus_fastas(
+            align_locus_fastas_script,
+            stage_dirs["08_Export_Locus_FASTAs"],
+            stage_dirs["09_Aligned_Locus_FASTAs"],
+            settings["align_thresholds"],
+            settings["threads"],
             logger,
             stage_dirs["00_Log"],
         )
