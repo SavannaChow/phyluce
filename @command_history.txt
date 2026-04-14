@@ -53,3 +53,7 @@
 [2026-03-12 14:41:15] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
 [2026-03-12 14:41:15] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
 [2026-03-12 14:41:15] [from Darwin SavannaMacBookPro-9.local]  3400  clang++ -O3 -std=c++11 src/VCF2PCACluster.cpp -o VCF2PCACluster
+[2026-04-14 13:58:25] [from Darwin SavannaMacBookPro-9.local]  3709  ./parse_txt_and_append_sr2.sh ./PRJNA*.txt allsamples2.csv
+[2026-04-14 16:57:25] [from Darwin SavannaMacBookPro-9.local]  3712  tar -czvf ./stylo_pop.tar.gz ./stylo_pop
+[2026-04-14 16:57:27] [from Darwin SavannaMacBookPro-9.local]  3712  tar -czvf ./stylo_pop.tar.gz ./stylo_pop
+[2026-04-14 16:57:31] [from Darwin SavannaMacBookPro-9.local]  3712  tar -czvf ./stylo_pop.tar.gz ./stylo_pop

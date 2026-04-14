@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+from collections import defaultdict, OrderedDict
+from pathlib import Path
+
+
+AGGREGATE_REQUIRED_FIELDS = {
+    "sample_id",
+    "uce_locus",
+    "target_name",
+    "target_start",
+    "target_end",
+    "strand",
+    "probe_hit_count",
+    "query_names",
+    "filtered_loci_path",
+}
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export one FASTA per UCE locus from aggregated loci tables and "
+            "sample-level extracted FASTA files."
+        )
+    )
+    parser.add_argument(
+        "--aggregated-loci",
+        required=True,
+        help="Aggregated long-format loci table from stage 07.",
+    )
+    parser.add_argument(
+        "--extract-dir",
+        required=True,
+        help="Stage 06 directory containing <sample>/<sample>.filtered.fasta files.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory for per-locus FASTA outputs.",
+    )
+    parser.add_argument(
+        "--sample-fasta-suffix",
+        default=".filtered.fasta",
+        help="Filename suffix used for per-sample FASTA files in --extract-dir.",
+    )
+    return parser.parse_args()
+
+
+def load_aggregated_loci(path):
+    rows = []
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None or not AGGREGATE_REQUIRED_FIELDS.issubset(
+            set(reader.fieldnames)
+        ):
+            raise RuntimeError("Unexpected aggregated loci schema in {}".format(path))
+        for row in reader:
+            rows.append(
+                {
+                    "sample_id": row["sample_id"].strip(),
+                    "uce_locus": row["uce_locus"].strip(),
+                }
+            )
+    if not rows:
+        raise RuntimeError("No loci rows found in {}".format(path))
+    return rows
+
+
+def parse_fasta(path):
+    records = OrderedDict()
+    current_header = None
+    chunks = []
+    with open(path) as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current_header is not None:
+                    records[current_header] = "".join(chunks)
+                current_header = line[1:]
+                chunks = []
+            else:
+                chunks.append(line)
+    if current_header is not None:
+        records[current_header] = "".join(chunks)
+    return records
+
+
+def parse_detailed_header(header):
+    record_id = header.split()[0]
+    parts = record_id.split("|")
+    if len(parts) < 2:
+        raise RuntimeError("Unexpected FASTA header format: {}".format(header))
+    return parts[0], parts[1]
+
+
+def build_sequence_index(extract_dir, suffix):
+    extract_root = Path(extract_dir).resolve()
+    files = sorted(extract_root.rglob("*{}".format(suffix)))
+    if not files:
+        raise RuntimeError(
+            "No sample FASTA files ending with {} found under {}".format(
+                suffix, extract_root
+            )
+        )
+    index = {}
+    for path in files:
+        for header, sequence in parse_fasta(path).items():
+            sample_id, uce_locus = parse_detailed_header(header)
+            key = (sample_id, uce_locus)
+            if key in index:
+                raise RuntimeError(
+                    "Duplicate FASTA record for sample/locus pair {} in {}".format(
+                        key, path
+                    )
+                )
+            index[key] = sequence
+    return index
+
+
+def write_locus_fastas(rows, sequence_index, output_dir):
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row["uce_locus"]].append(row["sample_id"])
+
+    output_root = Path(output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    loci_root = output_root / "loci"
+    loci_root.mkdir(parents=True, exist_ok=True)
+
+    summary_rows = []
+    for locus in sorted(grouped):
+        samples = sorted(grouped[locus])
+        found = []
+        missing = []
+        for sample_id in samples:
+            key = (sample_id, locus)
+            sequence = sequence_index.get(key)
+            if sequence is None:
+                missing.append(sample_id)
+            else:
+                found.append((sample_id, sequence))
+        fasta_path = loci_root / "{}.fasta".format(locus)
+        with open(fasta_path, "w") as handle:
+            for sample_id, sequence in found:
+                handle.write(">{}\n".format(sample_id))
+                handle.write("{}\n".format(sequence))
+        summary_rows.append(
+            {
+                "uce_locus": locus,
+                "samples_in_aggregate": len(samples),
+                "sequences_written": len(found),
+                "missing_sequences": len(missing),
+                "sample_ids_present": ",".join(sample for sample, _ in found),
+                "sample_ids_missing": ",".join(missing),
+                "fasta_path": str(fasta_path),
+            }
+        )
+    return summary_rows
+
+
+def write_summary(path, rows):
+    fieldnames = [
+        "uce_locus",
+        "samples_in_aggregate",
+        "sequences_written",
+        "missing_sequences",
+        "sample_ids_present",
+        "sample_ids_missing",
+        "fasta_path",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def main():
+    args = get_args()
+    rows = load_aggregated_loci(args.aggregated_loci)
+    sequence_index = build_sequence_index(args.extract_dir, args.sample_fasta_suffix)
+    summary_rows = write_locus_fastas(rows, sequence_index, args.output_dir)
+    summary_path = Path(args.output_dir).resolve() / "locus_fasta_summary.tsv"
+    write_summary(summary_path, summary_rows)
+    print(
+        "Exported {} locus FASTA files to {}".format(
+            len(summary_rows), Path(args.output_dir).resolve() / "loci"
+        )
+    )
+    print("summary\t{}".format(summary_path))
+
+
+if __name__ == "__main__":
+    main()

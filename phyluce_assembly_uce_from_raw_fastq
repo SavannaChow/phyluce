@@ -26,6 +26,7 @@ STAGE_NAMES = {
     5: "05_Filtering_uce_hits_trace",
     6: "06_extract_uce_fasta_from_hits",
     7: "07_Aggregated_loci",
+    8: "08_Export_Locus_FASTAs",
 }
 PROJECT_INFO_NAME = "project.info"
 INTERACTIVE_ACTIONS = {
@@ -37,6 +38,7 @@ INTERACTIVE_ACTIONS = {
     "5": ("stage5", "Run 05: Filter UCE hits and write trace"),
     "6": ("stage6", "Run 06: Extract UCE FASTA from filtered loci"),
     "7": ("stage7", "Run 07: Aggregate all filtered loci tables"),
+    "8": ("stage8", "Run 08: Export one FASTA per UCE locus"),
 }
 
 
@@ -149,14 +151,14 @@ def get_args():
     parser.add_argument(
         "--start-stage",
         type=int,
-        choices=range(1, 8),
+        choices=range(1, 9),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA.",
     )
     parser.add_argument(
         "--end-stage",
         type=int,
-        choices=range(1, 8),
+        choices=range(1, 9),
         default=None,
         help="Stage number to end at.",
     )
@@ -335,14 +337,14 @@ def choose_action_interactively():
         )
     print("Choose workflow action:")
     print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
-    for key in ("1", "2", "3", "4", "5", "6", "7"):
+    for key in ("1", "2", "3", "4", "5", "6", "7", "8"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f or 1-7): ").strip().lower()
+        answer = input("Enter choice (f or 1-8): ").strip().lower()
         if answer in INTERACTIVE_ACTIONS:
             key = INTERACTIVE_ACTIONS[answer][0]
             if key == "full":
-                return 1, 7
+                return 1, 8
             return int(key.replace("stage", "")), int(key.replace("stage", ""))
         print("Invalid choice.")
 
@@ -422,7 +424,7 @@ def infer_legacy_project_dir(current_dir, raw_dir):
     candidate = Path(current_dir) / Path(raw_dir).name
     if not candidate.is_dir():
         return None, None
-    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7)):
+    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8)):
         return candidate.name, candidate
     return None, None
 
@@ -1216,6 +1218,19 @@ def build_aggregate_command(aggregate_script, filter_root, aggregate_root, prefi
     ]
 
 
+def build_export_locus_fastas_command(export_script, aggregate_root, extract_root, output_root, prefix):
+    return [
+        sys.executable,
+        str(export_script),
+        "--aggregated-loci",
+        str(aggregate_root / "{}.filtered.loci.tsv".format(prefix)),
+        "--extract-dir",
+        str(extract_root),
+        "--output-dir",
+        str(output_root),
+    ]
+
+
 def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger, log_root):
     aggregate_root.mkdir(parents=True, exist_ok=True)
     sqlite_path = aggregate_root / "{}.uce.sqlite".format(prefix)
@@ -1227,6 +1242,22 @@ def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger,
         command,
         logger,
         log_path=log_root / "aggregate_loci.log",
+    )
+
+
+def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_root, prefix, logger, log_root):
+    output_root.mkdir(parents=True, exist_ok=True)
+    summary_path = output_root / "locus_fasta_summary.tsv"
+    if summary_path.exists():
+        return
+    command = build_export_locus_fastas_command(
+        export_script, aggregate_root, extract_root, output_root, prefix
+    )
+    logger.info("Exporting one FASTA per UCE locus")
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "export_locus_fastas.log",
     )
 
 
@@ -1445,6 +1476,33 @@ def print_dry_run_plan(
             )
         )
         print("")
+    if 8 in selected_stages:
+        print("[export_locus_fastas]")
+        print(
+            "  export_locus_fastas:\n    {}".format(
+                format_command(
+                    build_export_locus_fastas_command(
+                        executables["export_locus_fastas"],
+                        stage_dirs["07_Aggregated_loci"],
+                        stage_dirs["06_extract_uce_fasta_from_hits"],
+                        stage_dirs["08_Export_Locus_FASTAs"],
+                        project_id,
+                    )
+                )
+            )
+        )
+        print("  planned outputs:")
+        print(
+            "    loci dir: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "loci"
+            )
+        )
+        print(
+            "    summary: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "locus_fasta_summary.tsv"
+            )
+        )
+        print("")
     if 2 in selected_stages:
         print("[spades_summary]")
         print(
@@ -1485,6 +1543,7 @@ def main():
     filter_script = script_dir / "phyluce_assembly_filter_uce_hits_trace"
     extract_script = script_dir / "phyluce_assembly_extract_uce_fasta_from_hits"
     aggregate_script = script_dir / "phyluce_assembly_aggregate_filtered_loci"
+    export_locus_fastas_script = script_dir / "phyluce_assembly_export_locus_fastas"
 
     probes_path = settings["probes"]
     if need_raw_samples:
@@ -1502,6 +1561,7 @@ def main():
         "filter": filter_script,
         "extract": extract_script,
         "aggregate": aggregate_script,
+        "export_locus_fastas": export_locus_fastas_script,
     }
 
     if args.dry_run:
@@ -1664,6 +1724,16 @@ def main():
             aggregate_script,
             stage_dirs["05_Filtering_uce_hits_trace"],
             stage_dirs["07_Aggregated_loci"],
+            project_id,
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 8 <= args.end_stage:
+        run_export_locus_fastas(
+            export_locus_fastas_script,
+            stage_dirs["07_Aggregated_loci"],
+            stage_dirs["06_extract_uce_fasta_from_hits"],
+            stage_dirs["08_Export_Locus_FASTAs"],
             project_id,
             logger,
             stage_dirs["00_Log"],
