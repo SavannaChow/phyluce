@@ -275,7 +275,7 @@ def stream_process(command, logger, stdout_path=None, cwd=None, log_path=None):
         cwd=cwd,
         stdout=stdout_handle,
         stderr=stderr_setting,
-        text=True,
+        universal_newlines=True,
         bufsize=1,
     )
     captured_lines = []
