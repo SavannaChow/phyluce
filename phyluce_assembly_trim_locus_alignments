@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import os
+from collections import OrderedDict
+from pathlib import Path
+
+from Bio import AlignIO
+
+from phyluce.generic_align import GenericAlign
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Trim aligned per-locus FASTA files using the same three-stage "
+            "trimming and masking logic as phyluce generic_align.py."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        required=True,
+        help="Stage 09 directory containing threshold subdirectories.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        required=True,
+        help="Directory for trimmed locus FASTA outputs.",
+    )
+    parser.add_argument(
+        "--thresholds",
+        default=None,
+        help=(
+            "Optional comma-separated threshold labels to trim. Defaults to all "
+            "thresholds found in --input-dir."
+        ),
+    )
+    parser.add_argument("--window", type=int, default=20)
+    parser.add_argument("--proportion", type=float, default=0.65)
+    parser.add_argument("--threshold", type=float, default=0.65)
+    parser.add_argument("--max-divergence", type=float, default=0.20)
+    parser.add_argument("--min-length", type=int, default=100)
+    return parser.parse_args()
+
+
+def resolve_threshold_labels(input_dir, thresholds_text):
+    input_root = Path(input_dir).resolve()
+    if thresholds_text:
+        labels = [item.strip() for item in thresholds_text.split(",") if item.strip()]
+        if not labels:
+            raise RuntimeError("No valid thresholds were provided.")
+        return labels
+    labels = []
+    for path in sorted(input_root.iterdir()):
+        if not path.is_dir():
+            continue
+        if (path / "alignments").is_dir():
+            labels.append(path.name)
+    if not labels:
+        raise RuntimeError(
+            "No threshold directories with alignments/ found under {}".format(input_root)
+        )
+    return labels
+
+
+def discover_alignment_fastas(input_dir, threshold_label):
+    alignments_dir = Path(input_dir).resolve() / threshold_label / "alignments"
+    if not alignments_dir.is_dir():
+        raise RuntimeError("Missing alignments directory: {}".format(alignments_dir))
+    fasta_files = sorted(alignments_dir.glob("*.fasta"))
+    if not fasta_files:
+        raise RuntimeError("No aligned FASTA files found under {}".format(alignments_dir))
+    return fasta_files
+
+
+def alignment_taxa_and_length(path):
+    aln = AlignIO.read(path, "fasta")
+    return len(aln), aln.get_alignment_length()
+
+
+def trim_one_alignment(path, output_path, args):
+    input_taxa, input_length = alignment_taxa_and_length(path)
+    aln = GenericAlign(str(path))
+    aln._read("fasta")
+    aln.trim_alignment(
+        method="running",
+        window_size=args.window,
+        proportion=args.proportion,
+        threshold=args.threshold,
+        max_divergence=args.max_divergence,
+        min_len=args.min_length,
+    )
+    if aln.trimmed is None:
+        return {
+            "status": "dropped",
+            "reason": "trim_failed_or_below_min_length",
+            "input_taxa": input_taxa,
+            "input_length": input_length,
+            "output_taxa": 0,
+            "output_length": 0,
+        }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as handle:
+        handle.write(aln.trimmed.format("fasta"))
+    output_taxa = len(aln.trimmed)
+    output_length = aln.trimmed.get_alignment_length()
+    return {
+        "status": "trimmed",
+        "reason": "",
+        "input_taxa": input_taxa,
+        "input_length": input_length,
+        "output_taxa": output_taxa,
+        "output_length": output_length,
+    }
+
+
+def trim_threshold(input_dir, output_dir, threshold_label, args):
+    fasta_files = discover_alignment_fastas(input_dir, threshold_label)
+    threshold_output = Path(output_dir).resolve() / threshold_label
+    trimmed_dir = threshold_output / "trimmed_alignments"
+    summary_rows = []
+    for fasta_path in fasta_files:
+        output_path = trimmed_dir / fasta_path.name
+        if output_path.exists():
+            output_taxa, output_length = alignment_taxa_and_length(output_path)
+            input_taxa, input_length = alignment_taxa_and_length(fasta_path)
+            summary_rows.append(
+                {
+                    "threshold_label": threshold_label,
+                    "uce_locus": fasta_path.stem,
+                    "input_fasta": str(fasta_path),
+                    "output_fasta": str(output_path),
+                    "input_taxa": input_taxa,
+                    "input_length": input_length,
+                    "output_taxa": output_taxa,
+                    "output_length": output_length,
+                    "status": "existing",
+                    "reason": "",
+                }
+            )
+            continue
+        result = trim_one_alignment(fasta_path, output_path, args)
+        summary_rows.append(
+            {
+                "threshold_label": threshold_label,
+                "uce_locus": fasta_path.stem,
+                "input_fasta": str(fasta_path),
+                "output_fasta": str(output_path) if result["status"] != "dropped" else "",
+                "input_taxa": result["input_taxa"],
+                "input_length": result["input_length"],
+                "output_taxa": result["output_taxa"],
+                "output_length": result["output_length"],
+                "status": result["status"],
+                "reason": result["reason"],
+            }
+        )
+    summary_rows.sort(key=lambda row: row["uce_locus"])
+    return summary_rows
+
+
+def write_summary(path, rows):
+    fieldnames = [
+        "threshold_label",
+        "uce_locus",
+        "input_fasta",
+        "output_fasta",
+        "input_taxa",
+        "input_length",
+        "output_taxa",
+        "output_length",
+        "status",
+        "reason",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def write_threshold_manifest(path, rows):
+    fieldnames = [
+        "threshold_label",
+        "trimmed_files",
+        "existing_files",
+        "dropped_files",
+        "total_files",
+        "output_dir",
+        "summary_path",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def main():
+    args = get_args()
+    threshold_labels = resolve_threshold_labels(args.input_dir, args.thresholds)
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    all_rows = []
+    threshold_rows = []
+    for threshold_label in threshold_labels:
+        summary_rows = trim_threshold(args.input_dir, args.output_dir, threshold_label, args)
+        threshold_dir = output_root / threshold_label
+        summary_path = threshold_dir / "trimming_summary.tsv"
+        write_summary(summary_path, summary_rows)
+        all_rows.extend(summary_rows)
+        trimmed = sum(1 for row in summary_rows if row["status"] == "trimmed")
+        existing = sum(1 for row in summary_rows if row["status"] == "existing")
+        dropped = sum(1 for row in summary_rows if row["status"] == "dropped")
+        threshold_rows.append(
+            {
+                "threshold_label": threshold_label,
+                "trimmed_files": trimmed,
+                "existing_files": existing,
+                "dropped_files": dropped,
+                "total_files": len(summary_rows),
+                "output_dir": str(threshold_dir),
+                "summary_path": str(summary_path),
+            }
+        )
+    write_summary(output_root / "all_thresholds_trimming_manifest.tsv", all_rows)
+    write_threshold_manifest(output_root / "threshold_manifest.tsv", threshold_rows)
+    print("Trimmed locus alignments for {} thresholds under {}".format(len(threshold_labels), output_root))
+    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+
+
+if __name__ == "__main__":
+    main()

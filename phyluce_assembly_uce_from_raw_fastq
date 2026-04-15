@@ -28,10 +28,11 @@ STAGE_NAMES = {
     7: "07_Aggregated_loci",
     8: "08_Export_Locus_FASTAs",
     9: "09_Aligned_Locus_FASTAs",
+    10: "10_Trimmed_Locus_ALIGNMENTS",
 }
 PROJECT_INFO_NAME = "project.info"
 INTERACTIVE_ACTIONS = {
-    "f": ("full", "Run full pipeline (01-09)"),
+    "f": ("full", "Run full pipeline (01-10)"),
     "1": ("stage1", "Run 01: Trim reads with fastp"),
     "2": ("stage2", "Run 02: Assemble contigs with SPAdes"),
     "3": ("stage3", "Run 03: Align UCE probes to contigs with minimap2"),
@@ -41,6 +42,7 @@ INTERACTIVE_ACTIONS = {
     "7": ("stage7", "Run 07: Aggregate all filtered loci tables"),
     "8": ("stage8", "Run 08: Export one FASTA per UCE locus"),
     "9": ("stage9", "Run 09: Align per-locus FASTA files with MAFFT"),
+    "10": ("stage10", "Run 10: Trim and mask locus alignments"),
 }
 
 
@@ -175,6 +177,11 @@ def get_args():
         default=None,
         help="Path to the MAFFT executable for stage 9. Defaults to searching PATH.",
     )
+    parser.add_argument("--trim-window", type=int, default=20, help="Stage 10 trimming window size.")
+    parser.add_argument("--trim-proportion", type=float, default=0.65, help="Stage 10 trimming proportion parameter.")
+    parser.add_argument("--trim-threshold", type=float, default=0.65, help="Stage 10 trimming threshold parameter.")
+    parser.add_argument("--trim-max-divergence", type=float, default=0.20, help="Stage 10 row masking max divergence.")
+    parser.add_argument("--trim-min-length", type=int, default=100, help="Stage 10 minimum alignment length.")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -187,14 +194,14 @@ def get_args():
     parser.add_argument(
         "--start-stage",
         type=int,
-        choices=range(1, 10),
+        choices=range(1, 11),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA, 9=Align per-locus FASTA.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA, 9=Align per-locus FASTA, 10=Trim locus alignments.",
     )
     parser.add_argument(
         "--end-stage",
         type=int,
-        choices=range(1, 10),
+        choices=range(1, 11),
         default=None,
         help="Stage number to end at.",
     )
@@ -373,14 +380,14 @@ def choose_action_interactively():
         )
     print("Choose workflow action:")
     print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
-    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
+    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f or 1-9): ").strip().lower()
+        answer = input("Enter choice (f or 1-10): ").strip().lower()
         if answer in INTERACTIVE_ACTIONS:
             key = INTERACTIVE_ACTIONS[answer][0]
             if key == "full":
-                return 1, 9
+                return 1, 10
             return int(key.replace("stage", "")), int(key.replace("stage", ""))
         print("Invalid choice.")
 
@@ -460,7 +467,7 @@ def infer_legacy_project_dir(current_dir, raw_dir):
     candidate = Path(current_dir) / Path(raw_dir).name
     if not candidate.is_dir():
         return None, None
-    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9)):
+    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)):
         return candidate.name, candidate
     return None, None
 
@@ -535,7 +542,7 @@ def determine_stage_range(args):
     if args.start_stage is None and args.end_stage is None:
         if sys.stdin.isatty():
             return choose_action_interactively()
-        return 1, 9
+        return 1, 10
     if args.start_stage is None and args.end_stage is not None:
         return args.end_stage, args.end_stage
     if args.start_stage is not None and args.end_stage is None:
@@ -817,6 +824,27 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
         )
     else:
         settings["mafft_path"] = args.mafft_path if cli_flag_present("--mafft-path") else mafft_default
+
+    def resolve_trim_value(key, arg_value, prompt_message):
+        saved_value = project_info.get(key)
+        default_value = (
+            type(arg_value)(saved_value)
+            if saved_value not in (None, "N/A")
+            else arg_value
+        )
+        if 10 not in selected_stages or cli_flag_present("--" + key.replace("_", "-")):
+            return arg_value if cli_flag_present("--" + key.replace("_", "-")) else default_value
+        if isinstance(arg_value, int):
+            return prompt_int_with_default(prompt_message, default_value)
+        return prompt_float_with_default(prompt_message, default_value)
+
+    settings["trim_window"] = resolve_trim_value("trim_window", args.trim_window, "Stage 10 trim window")
+    settings["trim_proportion"] = resolve_trim_value("trim_proportion", args.trim_proportion, "Stage 10 trim proportion")
+    settings["trim_threshold"] = resolve_trim_value("trim_threshold", args.trim_threshold, "Stage 10 trim threshold")
+    settings["trim_max_divergence"] = resolve_trim_value(
+        "trim_max_divergence", args.trim_max_divergence, "Stage 10 max divergence"
+    )
+    settings["trim_min_length"] = resolve_trim_value("trim_min_length", args.trim_min_length, "Stage 10 minimum length")
 
     return settings
 
@@ -1383,6 +1411,40 @@ def build_align_locus_fastas_command(
     return command
 
 
+def build_trim_locus_alignments_command(
+    trim_script,
+    input_root,
+    output_root,
+    thresholds,
+    trim_window,
+    trim_proportion,
+    trim_threshold,
+    trim_max_divergence,
+    trim_min_length,
+):
+    command = [
+        sys.executable,
+        str(trim_script),
+        "--input-dir",
+        str(input_root),
+        "--output-dir",
+        str(output_root),
+        "--window",
+        str(trim_window),
+        "--proportion",
+        str(trim_proportion),
+        "--threshold",
+        str(trim_threshold),
+        "--max-divergence",
+        str(trim_max_divergence),
+        "--min-length",
+        str(trim_min_length),
+    ]
+    if thresholds and str(thresholds).strip().lower() != "all":
+        command.extend(["--thresholds", str(thresholds)])
+    return command
+
+
 def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger, log_root):
     aggregate_root.mkdir(parents=True, exist_ok=True)
     sqlite_path = aggregate_root / "{}.uce.sqlite".format(prefix)
@@ -1441,6 +1503,39 @@ def run_align_locus_fastas(
     )
 
 
+def run_trim_locus_alignments(
+    trim_script,
+    input_root,
+    output_root,
+    thresholds,
+    trim_window,
+    trim_proportion,
+    trim_threshold,
+    trim_max_divergence,
+    trim_min_length,
+    logger,
+    log_root,
+):
+    output_root.mkdir(parents=True, exist_ok=True)
+    command = build_trim_locus_alignments_command(
+        trim_script,
+        input_root,
+        output_root,
+        thresholds,
+        trim_window,
+        trim_proportion,
+        trim_threshold,
+        trim_max_divergence,
+        trim_min_length,
+    )
+    logger.info("Trimming and masking locus alignments")
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "trim_locus_alignments.log",
+    )
+
+
 def print_dry_run_plan(
     current_dir,
     raw_dir,
@@ -1490,6 +1585,11 @@ def print_dry_run_plan(
     print("Stage 9 ambiguous bases: {}".format("keep" if args.align_ambiguous else "drop"))
     print("Stage 9 matrix mode: {}".format(args.align_matrix_mode))
     print("Stage 9 MAFFT path: {}".format(args.mafft_path))
+    print("Stage 10 trim window: {}".format(args.trim_window))
+    print("Stage 10 trim proportion: {}".format(args.trim_proportion))
+    print("Stage 10 trim threshold: {}".format(args.trim_threshold))
+    print("Stage 10 trim max divergence: {}".format(args.trim_max_divergence))
+    print("Stage 10 trim min length: {}".format(args.trim_min_length))
     if samples:
         print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
     else:
@@ -1719,6 +1819,37 @@ def print_dry_run_plan(
             )
         )
         print("")
+    if 10 in selected_stages:
+        print("[trim_locus_alignments]")
+        print(
+            "  trim_locus_alignments:\n    {}".format(
+                format_command(
+                    build_trim_locus_alignments_command(
+                        executables["trim_locus_alignments"],
+                        stage_dirs["09_Aligned_Locus_FASTAs"],
+                        stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
+                        args.align_thresholds,
+                        args.trim_window,
+                        args.trim_proportion,
+                        args.trim_threshold,
+                        args.trim_max_divergence,
+                        args.trim_min_length,
+                    )
+                )
+            )
+        )
+        print("  planned outputs:")
+        print(
+            "    threshold manifest: {}".format(
+                stage_dirs["10_Trimmed_Locus_ALIGNMENTS"] / "threshold_manifest.tsv"
+            )
+        )
+        print(
+            "    all-threshold manifest: {}".format(
+                stage_dirs["10_Trimmed_Locus_ALIGNMENTS"] / "all_thresholds_trimming_manifest.tsv"
+            )
+        )
+        print("")
     if 2 in selected_stages:
         print("[spades_summary]")
         print(
@@ -1768,6 +1899,7 @@ def main():
     aggregate_script = script_dir / "phyluce_assembly_aggregate_filtered_loci"
     export_locus_fastas_script = script_dir / "phyluce_assembly_export_locus_fastas"
     align_locus_fastas_script = script_dir / "phyluce_assembly_align_locus_fastas"
+    trim_locus_alignments_script = script_dir / "phyluce_assembly_trim_locus_alignments"
 
     probes_path = settings["probes"]
     if need_raw_samples:
@@ -1787,6 +1919,7 @@ def main():
         "aggregate": aggregate_script,
         "export_locus_fastas": export_locus_fastas_script,
         "align_locus_fastas": align_locus_fastas_script,
+        "trim_locus_alignments": trim_locus_alignments_script,
         "mafft": mafft_path,
     }
 
@@ -1838,6 +1971,11 @@ def main():
                 ("align_ambiguous", settings["align_ambiguous"]),
                 ("align_matrix_mode", settings["align_matrix_mode"]),
                 ("mafft_path", mafft_path or settings["mafft_path"]),
+                ("trim_window", settings["trim_window"]),
+                ("trim_proportion", settings["trim_proportion"]),
+                ("trim_threshold", settings["trim_threshold"]),
+                ("trim_max_divergence", settings["trim_max_divergence"]),
+                ("trim_min_length", settings["trim_min_length"]),
             ]
         ),
     )
@@ -1863,6 +2001,11 @@ def main():
             "align_ambiguous": settings["align_ambiguous"],
             "align_matrix_mode": settings["align_matrix_mode"],
             "mafft_path": mafft_path or settings["mafft_path"],
+            "trim_window": settings["trim_window"],
+            "trim_proportion": settings["trim_proportion"],
+            "trim_threshold": settings["trim_threshold"],
+            "trim_max_divergence": settings["trim_max_divergence"],
+            "trim_min_length": settings["trim_min_length"],
             "dry_run": args.dry_run,
             "start_stage": args.start_stage,
             "end_stage": args.end_stage,
@@ -1986,6 +2129,20 @@ def main():
             settings["align_ambiguous"],
             settings["align_matrix_mode"],
             mafft_path or settings["mafft_path"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 10 <= args.end_stage:
+        run_trim_locus_alignments(
+            trim_locus_alignments_script,
+            stage_dirs["09_Aligned_Locus_FASTAs"],
+            stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
+            settings["align_thresholds"],
+            settings["trim_window"],
+            settings["trim_proportion"],
+            settings["trim_threshold"],
+            settings["trim_max_divergence"],
+            settings["trim_min_length"],
             logger,
             stage_dirs["00_Log"],
         )
