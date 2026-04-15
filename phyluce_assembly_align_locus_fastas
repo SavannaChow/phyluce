@@ -5,6 +5,7 @@ import csv
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import OrderedDict
 from pathlib import Path
 
 
@@ -39,6 +40,27 @@ def get_args():
         type=int,
         default=os.cpu_count() or 1,
         help="Maximum number of parallel MAFFT jobs.",
+    )
+    parser.add_argument(
+        "--ambiguous",
+        action="store_true",
+        default=False,
+        help="Keep sequences containing ambiguous N bases. By default these are removed before alignment.",
+    )
+    parser.add_argument(
+        "--matrix-mode",
+        choices=["auto", "strict", "incomplete"],
+        default="auto",
+        help=(
+            "Pre-alignment taxon rule. 'strict' requires all expected taxa, "
+            "'incomplete' requires at least 3 taxa, and 'auto' uses strict "
+            "for complete_matrix and incomplete otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--mafft-path",
+        default="mafft",
+        help="Path to the MAFFT executable.",
     )
     return parser.parse_args()
 
@@ -89,9 +111,99 @@ def discover_locus_fastas(input_dir, threshold_label):
     return fasta_files
 
 
-def run_mafft(input_fasta, output_fasta):
+def parse_fasta(path):
+    records = OrderedDict()
+    current_header = None
+    chunks = []
+    with open(path) as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current_header is not None:
+                    records[current_header] = "".join(chunks)
+                current_header = line[1:]
+                chunks = []
+            else:
+                chunks.append(line)
+    if current_header is not None:
+        records[current_header] = "".join(chunks)
+    return records
+
+
+def write_fasta(path, records):
+    with open(path, "w") as handle:
+        for header, sequence in records.items():
+            handle.write(">{}\n".format(header))
+            handle.write("{}\n".format(sequence))
+
+
+def read_locus_summary(input_dir, threshold_label):
+    summary_path = Path(input_dir).resolve() / threshold_label / "locus_fasta_summary.tsv"
+    if not summary_path.is_file():
+        raise RuntimeError("Missing locus summary for {}: {}".format(threshold_label, summary_path))
+    rows = []
+    with open(summary_path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            rows.append(row)
+    if not rows:
+        raise RuntimeError("No locus rows found in {}".format(summary_path))
+    try:
+        total_samples = max(int(row["total_samples"]) for row in rows)
+    except KeyError as exc:
+        raise RuntimeError("Unexpected stage 08 summary schema in {}".format(summary_path)) from exc
+    return total_samples
+
+
+def resolve_matrix_mode(matrix_mode, threshold_label):
+    if matrix_mode != "auto":
+        return matrix_mode
+    if threshold_label == "complete_matrix":
+        return "strict"
+    return "incomplete"
+
+
+def prefilter_locus(input_fasta, prefiltered_fasta, threshold_label, total_taxa, matrix_mode, allow_ambiguous):
+    records = parse_fasta(input_fasta)
+    input_taxa = len(records)
+    retained = OrderedDict()
+    ambiguous_removed = []
+    for header, sequence in records.items():
+        if not allow_ambiguous and "N" in sequence.upper():
+            ambiguous_removed.append(header)
+            continue
+        retained[header] = sequence
+    retained_taxa = len(retained)
+    effective_mode = resolve_matrix_mode(matrix_mode, threshold_label)
+    status = "ready"
+    reason = ""
+    if effective_mode == "strict":
+        if retained_taxa < total_taxa:
+            status = "dropped"
+            reason = "too_few_taxa_strict"
+    else:
+        if retained_taxa < 3:
+            status = "dropped"
+            reason = "too_few_taxa_incomplete"
+    if status == "ready":
+        prefiltered_fasta.parent.mkdir(parents=True, exist_ok=True)
+        write_fasta(prefiltered_fasta, retained)
+    return {
+        "input_taxa": input_taxa,
+        "retained_taxa": retained_taxa,
+        "ambiguous_removed": len(ambiguous_removed),
+        "ambiguous_removed_ids": ",".join(ambiguous_removed),
+        "matrix_mode": effective_mode,
+        "status": status,
+        "reason": reason,
+    }
+
+
+def run_mafft(input_fasta, output_fasta, mafft_path):
     command = [
-        "mafft",
+        str(mafft_path),
         "--adjustdirection",
         "--maxiterate",
         "1000",
@@ -113,46 +225,67 @@ def run_mafft(input_fasta, output_fasta):
     return process.stderr
 
 
-def align_threshold(input_dir, output_dir, threshold_label, jobs):
+def align_threshold(input_dir, output_dir, threshold_label, jobs, matrix_mode, allow_ambiguous, mafft_path):
     fasta_files = discover_locus_fastas(input_dir, threshold_label)
+    total_taxa = read_locus_summary(input_dir, threshold_label)
     threshold_output = Path(output_dir).resolve() / threshold_label
+    prefiltered_dir = threshold_output / "prefiltered_fastas"
     alignments_dir = threshold_output / "alignments"
     alignments_dir.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
     pending = []
     for fasta_path in fasta_files:
+        prefiltered_path = prefiltered_dir / fasta_path.name
         output_path = alignments_dir / fasta_path.name
+        prefilter_result = prefilter_locus(
+            fasta_path,
+            prefiltered_path,
+            threshold_label,
+            total_taxa,
+            matrix_mode,
+            allow_ambiguous,
+        )
+        locus_row = {
+            "threshold_label": threshold_label,
+            "uce_locus": fasta_path.stem,
+            "input_fasta": str(fasta_path),
+            "prefiltered_fasta": str(prefiltered_path) if prefilter_result["status"] == "ready" else "",
+            "output_fasta": str(output_path) if prefilter_result["status"] != "dropped" else "",
+            "total_taxa": total_taxa,
+            "input_taxa": prefilter_result["input_taxa"],
+            "retained_taxa": prefilter_result["retained_taxa"],
+            "ambiguous_removed": prefilter_result["ambiguous_removed"],
+            "ambiguous_removed_ids": prefilter_result["ambiguous_removed_ids"],
+            "matrix_mode": prefilter_result["matrix_mode"],
+        }
+        if prefilter_result["status"] == "dropped":
+            locus_row["status"] = "dropped"
+            locus_row["reason"] = prefilter_result["reason"]
+            summary_rows.append(locus_row)
+            continue
         if output_path.exists():
-            summary_rows.append(
-                {
-                    "threshold_label": threshold_label,
-                    "uce_locus": fasta_path.stem,
-                    "input_fasta": str(fasta_path),
-                    "output_fasta": str(output_path),
-                    "status": "existing",
-                }
-            )
+            locus_row["status"] = "existing"
+            locus_row["reason"] = ""
+            summary_rows.append(locus_row)
         else:
-            pending.append((fasta_path, output_path))
+            pending.append((prefiltered_path, output_path, locus_row))
 
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
         futures = {
-            executor.submit(run_mafft, fasta_path, output_path): (fasta_path, output_path)
-            for fasta_path, output_path in pending
+            executor.submit(run_mafft, prefiltered_path, output_path, mafft_path): (
+                prefiltered_path,
+                output_path,
+                locus_row,
+            )
+            for prefiltered_path, output_path, locus_row in pending
         }
         for future in as_completed(futures):
-            fasta_path, output_path = futures[future]
+            _, output_path, locus_row = futures[future]
             future.result()
-            summary_rows.append(
-                {
-                    "threshold_label": threshold_label,
-                    "uce_locus": fasta_path.stem,
-                    "input_fasta": str(fasta_path),
-                    "output_fasta": str(output_path),
-                    "status": "aligned",
-                }
-            )
+            locus_row["status"] = "aligned"
+            locus_row["reason"] = ""
+            summary_rows.append(locus_row)
 
     summary_rows.sort(key=lambda row: row["uce_locus"])
     return summary_rows
@@ -163,8 +296,16 @@ def write_alignment_summary(path, rows):
         "threshold_label",
         "uce_locus",
         "input_fasta",
+        "prefiltered_fasta",
         "output_fasta",
+        "total_taxa",
+        "input_taxa",
+        "retained_taxa",
+        "ambiguous_removed",
+        "ambiguous_removed_ids",
+        "matrix_mode",
         "status",
+        "reason",
     ]
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
@@ -178,7 +319,10 @@ def write_threshold_summary(path, rows):
         "threshold_label",
         "aligned_files",
         "existing_files",
+        "dropped_files",
         "total_files",
+        "matrix_mode",
+        "ambiguous_mode",
         "output_dir",
         "summary_path",
     ]
@@ -198,19 +342,31 @@ def main():
     all_rows = []
     threshold_rows = []
     for threshold_label in threshold_labels:
-        summary_rows = align_threshold(args.input_dir, args.output_dir, threshold_label, args.jobs)
+        summary_rows = align_threshold(
+            args.input_dir,
+            args.output_dir,
+            threshold_label,
+            args.jobs,
+            args.matrix_mode,
+            args.ambiguous,
+            args.mafft_path,
+        )
         threshold_dir = output_root / threshold_label
         summary_path = threshold_dir / "alignment_summary.tsv"
         write_alignment_summary(summary_path, summary_rows)
         all_rows.extend(summary_rows)
         aligned = sum(1 for row in summary_rows if row["status"] == "aligned")
         existing = sum(1 for row in summary_rows if row["status"] == "existing")
+        dropped = sum(1 for row in summary_rows if row["status"] == "dropped")
         threshold_rows.append(
             {
                 "threshold_label": threshold_label,
                 "aligned_files": aligned,
                 "existing_files": existing,
+                "dropped_files": dropped,
                 "total_files": len(summary_rows),
+                "matrix_mode": resolve_matrix_mode(args.matrix_mode, threshold_label),
+                "ambiguous_mode": "keep" if args.ambiguous else "drop",
                 "output_dir": str(threshold_dir),
                 "summary_path": str(summary_path),
             }

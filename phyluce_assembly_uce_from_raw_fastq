@@ -159,6 +159,23 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--align-ambiguous",
+        action="store_true",
+        default=False,
+        help="Keep sequences containing ambiguous N bases during stage 9 pre-filtering.",
+    )
+    parser.add_argument(
+        "--align-matrix-mode",
+        choices=["auto", "strict", "incomplete"],
+        default="auto",
+        help="Stage 9 taxon rule. 'auto' uses strict for complete_matrix and incomplete otherwise.",
+    )
+    parser.add_argument(
+        "--mafft-path",
+        default=None,
+        help="Path to the MAFFT executable for stage 9. Defaults to searching PATH.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -753,6 +770,54 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
             else align_thresholds_default
         )
 
+    saved_align_ambiguous = project_info.get("align_ambiguous")
+    align_ambiguous_default = (
+        str(saved_align_ambiguous).lower() == "true"
+        if saved_align_ambiguous not in (None, "N/A")
+        else args.align_ambiguous
+    )
+    if 9 in selected_stages and not cli_flag_present("--align-ambiguous"):
+        settings["align_ambiguous"] = (
+            prompt_choice_with_default(
+                "Stage 9 ambiguous bases", "drop" if not align_ambiguous_default else "keep", ["drop", "keep"]
+            )
+            == "keep"
+        )
+    else:
+        settings["align_ambiguous"] = align_ambiguous_default or cli_flag_present("--align-ambiguous")
+
+    saved_align_matrix_mode = project_info.get("align_matrix_mode")
+    align_matrix_mode_default = (
+        saved_align_matrix_mode
+        if saved_align_matrix_mode not in (None, "N/A")
+        else args.align_matrix_mode
+    )
+    if 9 in selected_stages and not cli_flag_present("--align-matrix-mode"):
+        settings["align_matrix_mode"] = prompt_choice_with_default(
+            "Stage 9 matrix mode",
+            align_matrix_mode_default,
+            ["auto", "strict", "incomplete"],
+        )
+    else:
+        settings["align_matrix_mode"] = (
+            args.align_matrix_mode
+            if cli_flag_present("--align-matrix-mode")
+            else align_matrix_mode_default
+        )
+
+    saved_mafft_path = project_info.get("mafft_path")
+    mafft_default = (
+        saved_mafft_path
+        if saved_mafft_path not in (None, "N/A")
+        else (args.mafft_path if args.mafft_path else "mafft")
+    )
+    if 9 in selected_stages and not cli_flag_present("--mafft-path"):
+        settings["mafft_path"] = prompt_text_with_default(
+            "Stage 9 MAFFT path", mafft_default
+        )
+    else:
+        settings["mafft_path"] = args.mafft_path if cli_flag_present("--mafft-path") else mafft_default
+
     return settings
 
 
@@ -1287,7 +1352,16 @@ def build_export_locus_fastas_command(export_script, aggregate_root, extract_roo
     ]
 
 
-def build_align_locus_fastas_command(align_script, input_root, output_root, thresholds, jobs):
+def build_align_locus_fastas_command(
+    align_script,
+    input_root,
+    output_root,
+    thresholds,
+    jobs,
+    align_ambiguous,
+    align_matrix_mode,
+    mafft_path,
+):
     command = [
         sys.executable,
         str(align_script),
@@ -1300,6 +1374,12 @@ def build_align_locus_fastas_command(align_script, input_root, output_root, thre
     ]
     if thresholds and str(thresholds).strip().lower() != "all":
         command.extend(["--thresholds", str(thresholds)])
+    if align_ambiguous:
+        command.append("--ambiguous")
+    if align_matrix_mode:
+        command.extend(["--matrix-mode", str(align_matrix_mode)])
+    if mafft_path:
+        command.extend(["--mafft-path", str(mafft_path)])
     return command
 
 
@@ -1330,10 +1410,28 @@ def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_
     )
 
 
-def run_align_locus_fastas(align_script, input_root, output_root, thresholds, jobs, logger, log_root):
+def run_align_locus_fastas(
+    align_script,
+    input_root,
+    output_root,
+    thresholds,
+    jobs,
+    align_ambiguous,
+    align_matrix_mode,
+    mafft_path,
+    logger,
+    log_root,
+):
     output_root.mkdir(parents=True, exist_ok=True)
     command = build_align_locus_fastas_command(
-        align_script, input_root, output_root, thresholds, jobs
+        align_script,
+        input_root,
+        output_root,
+        thresholds,
+        jobs,
+        align_ambiguous,
+        align_matrix_mode,
+        mafft_path,
     )
     logger.info("Aligning per-locus FASTA files with MAFFT")
     stream_process(
@@ -1389,6 +1487,9 @@ def print_dry_run_plan(
     print("Flank: {}".format(args.flank))
     print("Stage 8 locus thresholds: {}".format(args.locus_thresholds))
     print("Stage 9 align thresholds: {}".format(args.align_thresholds))
+    print("Stage 9 ambiguous bases: {}".format("keep" if args.align_ambiguous else "drop"))
+    print("Stage 9 matrix mode: {}".format(args.align_matrix_mode))
+    print("Stage 9 MAFFT path: {}".format(args.mafft_path))
     if samples:
         print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
     else:
@@ -1599,6 +1700,9 @@ def print_dry_run_plan(
                         stage_dirs["09_Aligned_Locus_FASTAs"],
                         args.align_thresholds,
                         args.threads,
+                        args.align_ambiguous,
+                        args.align_matrix_mode,
+                        args.mafft_path,
                     )
                 )
             )
@@ -1642,6 +1746,13 @@ def main():
     fastp_path = require_executable(["fastp"]) if 1 in selected_stages else None
     spades_path = require_executable(["spades.py"]) if 2 in selected_stages else None
     minimap2_path = require_executable(["minimap2"]) if 3 in selected_stages else None
+    mafft_path = None
+    if 9 in selected_stages:
+        mafft_path = (
+            str(Path(settings["mafft_path"]).expanduser())
+            if settings["mafft_path"] and settings["mafft_path"] != "mafft"
+            else require_executable(["mafft"])
+        )
     decompressor = shutil.which("pigz") or shutil.which("gzip")
     if raw_dir is not None and 1 in selected_stages and decompressor is None and any(
         path.name.lower().endswith(GZ_FASTQ_EXTENSIONS)
@@ -1676,6 +1787,7 @@ def main():
         "aggregate": aggregate_script,
         "export_locus_fastas": export_locus_fastas_script,
         "align_locus_fastas": align_locus_fastas_script,
+        "mafft": mafft_path,
     }
 
     if args.dry_run:
@@ -1723,6 +1835,9 @@ def main():
                 ("flank", settings["flank"]),
                 ("locus_thresholds", settings["locus_thresholds"]),
                 ("align_thresholds", settings["align_thresholds"]),
+                ("align_ambiguous", settings["align_ambiguous"]),
+                ("align_matrix_mode", settings["align_matrix_mode"]),
+                ("mafft_path", mafft_path or settings["mafft_path"]),
             ]
         ),
     )
@@ -1745,12 +1860,16 @@ def main():
             "flank": settings["flank"],
             "locus_thresholds": settings["locus_thresholds"],
             "align_thresholds": settings["align_thresholds"],
+            "align_ambiguous": settings["align_ambiguous"],
+            "align_matrix_mode": settings["align_matrix_mode"],
+            "mafft_path": mafft_path or settings["mafft_path"],
             "dry_run": args.dry_run,
             "start_stage": args.start_stage,
             "end_stage": args.end_stage,
             "fastp_path": fastp_path or "N/A",
             "spades_path": spades_path or "N/A",
             "minimap2_path": minimap2_path or "N/A",
+            "mafft_path": mafft_path or "N/A",
             "decompressor": decompressor or "none",
             "raw_dir_source": args.raw_dir or "interactive_selection",
             "project_id_source": args.project_id or "interactive_input",
@@ -1864,6 +1983,9 @@ def main():
             stage_dirs["09_Aligned_Locus_FASTAs"],
             settings["align_thresholds"],
             settings["threads"],
+            settings["align_ambiguous"],
+            settings["align_matrix_mode"],
+            mafft_path or settings["mafft_path"],
             logger,
             stage_dirs["00_Log"],
         )
