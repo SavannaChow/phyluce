@@ -29,10 +29,11 @@ STAGE_NAMES = {
     8: "08_Export_Locus_FASTAs",
     9: "09_Aligned_Locus_FASTAs",
     10: "10_Trimmed_Locus_ALIGNMENTS",
+    11: "11_Filtered_Locus_ALIGNMENTS",
 }
 PROJECT_INFO_NAME = "project.info"
 INTERACTIVE_ACTIONS = {
-    "f": ("full", "Run full pipeline (01-10)"),
+    "f": ("full", "Run full pipeline (01-11)"),
     "1": ("stage1", "Run 01: Trim reads with fastp"),
     "2": ("stage2", "Run 02: Assemble contigs with SPAdes"),
     "3": ("stage3", "Run 03: Align UCE probes to contigs with minimap2"),
@@ -43,6 +44,7 @@ INTERACTIVE_ACTIONS = {
     "8": ("stage8", "Run 08: Export one FASTA per UCE locus"),
     "9": ("stage9", "Run 09: Align per-locus FASTA files with MAFFT"),
     "10": ("stage10", "Run 10: Trim and mask locus alignments"),
+    "11": ("stage11", "Run 11: Filter locus alignments by taxa completeness"),
 }
 
 
@@ -183,6 +185,14 @@ def get_args():
     parser.add_argument("--trim-max-divergence", type=float, default=0.20, help="Stage 10 row masking max divergence.")
     parser.add_argument("--trim-min-length", type=int, default=100, help="Stage 10 minimum alignment length.")
     parser.add_argument(
+        "--post-align-thresholds",
+        default="1.0",
+        help=(
+            "Comma-separated post-alignment completeness thresholds for stage 11, "
+            "e.g. '1.0,0.9,0.75'."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -194,14 +204,14 @@ def get_args():
     parser.add_argument(
         "--start-stage",
         type=int,
-        choices=range(1, 11),
+        choices=range(1, 12),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA, 9=Align per-locus FASTA, 10=Trim locus alignments.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA, 9=Align per-locus FASTA, 10=Trim locus alignments, 11=Filter locus alignments by taxa completeness.",
     )
     parser.add_argument(
         "--end-stage",
         type=int,
-        choices=range(1, 11),
+        choices=range(1, 12),
         default=None,
         help="Stage number to end at.",
     )
@@ -380,14 +390,14 @@ def choose_action_interactively():
         )
     print("Choose workflow action:")
     print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
-    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10"):
+    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f or 1-10): ").strip().lower()
+        answer = input("Enter choice (f or 1-11): ").strip().lower()
         if answer in INTERACTIVE_ACTIONS:
             key = INTERACTIVE_ACTIONS[answer][0]
             if key == "full":
-                return 1, 10
+                return 1, 11
             return int(key.replace("stage", "")), int(key.replace("stage", ""))
         print("Invalid choice.")
 
@@ -467,7 +477,7 @@ def infer_legacy_project_dir(current_dir, raw_dir):
     candidate = Path(current_dir) / Path(raw_dir).name
     if not candidate.is_dir():
         return None, None
-    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)):
+    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)):
         return candidate.name, candidate
     return None, None
 
@@ -542,7 +552,7 @@ def determine_stage_range(args):
     if args.start_stage is None and args.end_stage is None:
         if sys.stdin.isatty():
             return choose_action_interactively()
-        return 1, 10
+        return 1, 11
     if args.start_stage is None and args.end_stage is not None:
         return args.end_stage, args.end_stage
     if args.start_stage is not None and args.end_stage is None:
@@ -845,6 +855,24 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
         "trim_max_divergence", args.trim_max_divergence, "Stage 10 max divergence"
     )
     settings["trim_min_length"] = resolve_trim_value("trim_min_length", args.trim_min_length, "Stage 10 minimum length")
+
+    saved_post_align_thresholds = project_info.get("post_align_thresholds")
+    post_align_thresholds_default = (
+        saved_post_align_thresholds
+        if saved_post_align_thresholds not in (None, "N/A")
+        else args.post_align_thresholds
+    )
+    if 11 in selected_stages and not cli_flag_present("--post-align-thresholds"):
+        settings["post_align_thresholds"] = prompt_text_with_default(
+            "Stage 11 post-alignment completeness thresholds",
+            post_align_thresholds_default,
+        )
+    else:
+        settings["post_align_thresholds"] = (
+            args.post_align_thresholds
+            if cli_flag_present("--post-align-thresholds")
+            else post_align_thresholds_default
+        )
 
     return settings
 
@@ -1445,6 +1473,31 @@ def build_trim_locus_alignments_command(
     return command
 
 
+def build_filter_locus_alignments_command(
+    filter_script,
+    input_root,
+    reference_root,
+    output_root,
+    threshold_groups,
+    completeness_thresholds,
+):
+    command = [
+        sys.executable,
+        str(filter_script),
+        "--input-dir",
+        str(input_root),
+        "--reference-dir",
+        str(reference_root),
+        "--output-dir",
+        str(output_root),
+        "--completeness-thresholds",
+        str(completeness_thresholds),
+    ]
+    if threshold_groups and str(threshold_groups).strip().lower() != "all":
+        command.extend(["--threshold-groups", str(threshold_groups)])
+    return command
+
+
 def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger, log_root):
     aggregate_root.mkdir(parents=True, exist_ok=True)
     sqlite_path = aggregate_root / "{}.uce.sqlite".format(prefix)
@@ -1536,6 +1589,33 @@ def run_trim_locus_alignments(
     )
 
 
+def run_filter_locus_alignments(
+    filter_script,
+    input_root,
+    reference_root,
+    output_root,
+    threshold_groups,
+    completeness_thresholds,
+    logger,
+    log_root,
+):
+    output_root.mkdir(parents=True, exist_ok=True)
+    command = build_filter_locus_alignments_command(
+        filter_script,
+        input_root,
+        reference_root,
+        output_root,
+        threshold_groups,
+        completeness_thresholds,
+    )
+    logger.info("Filtering locus alignments by taxa completeness")
+    stream_process(
+        command,
+        logger,
+        log_path=log_root / "filter_locus_alignments.log",
+    )
+
+
 def print_dry_run_plan(
     current_dir,
     raw_dir,
@@ -1590,6 +1670,7 @@ def print_dry_run_plan(
     print("Stage 10 trim threshold: {}".format(args.trim_threshold))
     print("Stage 10 trim max divergence: {}".format(args.trim_max_divergence))
     print("Stage 10 trim min length: {}".format(args.trim_min_length))
+    print("Stage 11 post-alignment thresholds: {}".format(args.post_align_thresholds))
     if samples:
         print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
     else:
@@ -1850,6 +1931,34 @@ def print_dry_run_plan(
             )
         )
         print("")
+    if 11 in selected_stages:
+        print("[filter_locus_alignments]")
+        print(
+            "  filter_locus_alignments:\n    {}".format(
+                format_command(
+                    build_filter_locus_alignments_command(
+                        executables["filter_locus_alignments"],
+                        stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
+                        stage_dirs["09_Aligned_Locus_FASTAs"],
+                        stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
+                        args.align_thresholds,
+                        args.post_align_thresholds,
+                    )
+                )
+            )
+        )
+        print("  planned outputs:")
+        print(
+            "    threshold manifest: {}".format(
+                stage_dirs["11_Filtered_Locus_ALIGNMENTS"] / "threshold_manifest.tsv"
+            )
+        )
+        print(
+            "    all-threshold manifest: {}".format(
+                stage_dirs["11_Filtered_Locus_ALIGNMENTS"] / "all_thresholds_filter_manifest.tsv"
+            )
+        )
+        print("")
     if 2 in selected_stages:
         print("[spades_summary]")
         print(
@@ -1900,6 +2009,7 @@ def main():
     export_locus_fastas_script = script_dir / "phyluce_assembly_export_locus_fastas"
     align_locus_fastas_script = script_dir / "phyluce_assembly_align_locus_fastas"
     trim_locus_alignments_script = script_dir / "phyluce_assembly_trim_locus_alignments"
+    filter_locus_alignments_script = script_dir / "phyluce_assembly_filter_locus_alignments_by_taxa"
 
     probes_path = settings["probes"]
     if need_raw_samples:
@@ -1920,6 +2030,7 @@ def main():
         "export_locus_fastas": export_locus_fastas_script,
         "align_locus_fastas": align_locus_fastas_script,
         "trim_locus_alignments": trim_locus_alignments_script,
+        "filter_locus_alignments": filter_locus_alignments_script,
         "mafft": mafft_path,
     }
 
@@ -1976,6 +2087,7 @@ def main():
                 ("trim_threshold", settings["trim_threshold"]),
                 ("trim_max_divergence", settings["trim_max_divergence"]),
                 ("trim_min_length", settings["trim_min_length"]),
+                ("post_align_thresholds", settings["post_align_thresholds"]),
             ]
         ),
     )
@@ -2006,6 +2118,7 @@ def main():
             "trim_threshold": settings["trim_threshold"],
             "trim_max_divergence": settings["trim_max_divergence"],
             "trim_min_length": settings["trim_min_length"],
+            "post_align_thresholds": settings["post_align_thresholds"],
             "dry_run": args.dry_run,
             "start_stage": args.start_stage,
             "end_stage": args.end_stage,
@@ -2143,6 +2256,17 @@ def main():
             settings["trim_threshold"],
             settings["trim_max_divergence"],
             settings["trim_min_length"],
+            logger,
+            stage_dirs["00_Log"],
+        )
+    if args.start_stage <= 11 <= args.end_stage:
+        run_filter_locus_alignments(
+            filter_locus_alignments_script,
+            stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
+            stage_dirs["09_Aligned_Locus_FASTAs"],
+            stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
+            settings["align_thresholds"],
+            settings["post_align_thresholds"],
             logger,
             stage_dirs["00_Log"],
         )
