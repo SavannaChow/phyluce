@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+from collections import OrderedDict
+from pathlib import Path
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Add missing-data designators to filtered locus alignments so each "
+            "alignment has the same taxon set."
+        )
+    )
+    parser.add_argument("--input-dir", required=True, help="Stage 11 directory.")
+    parser.add_argument(
+        "--aggregated-loci",
+        required=True,
+        help="Stage 07 aggregated long-format loci table used to recover all sample IDs.",
+    )
+    parser.add_argument("--output-dir", required=True, help="Directory for completed alignments.")
+    parser.add_argument(
+        "--threshold-groups",
+        default=None,
+        help="Optional comma-separated input threshold groups to process.",
+    )
+    parser.add_argument(
+        "--filter-labels",
+        default=None,
+        help=(
+            "Optional comma-separated filter labels or values to process, e.g. "
+            "'complete_matrix,min_taxa_075' or '1.0,0.75'. Defaults to all."
+        ),
+    )
+    parser.add_argument(
+        "--missing-character",
+        default="?",
+        help="Character to use for missing data designators.",
+    )
+    return parser.parse_args()
+
+
+def parse_fasta(path):
+    records = OrderedDict()
+    current = None
+    chunks = []
+    with open(path) as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current is not None:
+                    records[current] = "".join(chunks)
+                current = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+    if current is not None:
+        records[current] = "".join(chunks)
+    return records
+
+
+def write_fasta(path, records):
+    with open(path, "w") as handle:
+        for header, seq in records.items():
+            handle.write(">{}\n".format(header))
+            handle.write("{}\n".format(seq))
+
+
+def normalize_taxon_name(name):
+    while name.startswith("_R_"):
+        name = name[3:]
+    return name
+
+
+def read_all_taxa(aggregated_loci):
+    taxa = []
+    seen = set()
+    with open(aggregated_loci, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None or "sample_id" not in reader.fieldnames:
+            raise RuntimeError("Unexpected aggregated loci schema in {}".format(aggregated_loci))
+        for row in reader:
+            sample_id = row["sample_id"].strip()
+            if sample_id and sample_id not in seen:
+                seen.add(sample_id)
+                taxa.append(sample_id)
+    if not taxa:
+        raise RuntimeError("No sample_id values found in {}".format(aggregated_loci))
+    return sorted(taxa)
+
+
+def threshold_groups(input_dir, requested):
+    input_root = Path(input_dir).resolve()
+    if requested:
+        labels = [item.strip() for item in requested.split(",") if item.strip()]
+        if not labels:
+            raise RuntimeError("No valid threshold groups were provided.")
+        return labels
+    labels = []
+    for path in sorted(input_root.iterdir()):
+        if path.is_dir():
+            labels.append(path.name)
+    if not labels:
+        raise RuntimeError("No threshold groups found under {}".format(input_root))
+    return labels
+
+
+def filter_label_from_value(value):
+    threshold = float(value)
+    if threshold <= 0 or threshold > 1:
+        raise RuntimeError("Filter label values must be > 0 and <= 1: {}".format(value))
+    if abs(threshold - 1.0) < 1e-9:
+        return "complete_matrix"
+    return "min_taxa_{:03d}".format(int(round(threshold * 100)))
+
+
+def filter_labels(input_dir, threshold_group, requested):
+    group_root = Path(input_dir).resolve() / threshold_group
+    if requested:
+        labels = []
+        for item in requested.split(","):
+            value = item.strip()
+            if not value:
+                continue
+            if value == "complete_matrix" or value.startswith("min_taxa_"):
+                labels.append(value)
+            else:
+                labels.append(filter_label_from_value(value))
+        if not labels:
+            raise RuntimeError("No valid filter labels were provided.")
+        return labels
+    labels = []
+    for path in sorted(group_root.iterdir()):
+        if path.is_dir() and (path / "alignments").is_dir():
+            labels.append(path.name)
+    if not labels:
+        raise RuntimeError("No filter labels found under {}".format(group_root))
+    return labels
+
+
+def discover_alignments(input_dir, threshold_group, filter_label):
+    alignments_dir = Path(input_dir).resolve() / threshold_group / filter_label / "alignments"
+    if not alignments_dir.is_dir():
+        raise RuntimeError("Missing alignments directory: {}".format(alignments_dir))
+    files = sorted(alignments_dir.glob("*.fasta"))
+    if not files:
+        raise RuntimeError("No alignment FASTA files found under {}".format(alignments_dir))
+    return files
+
+
+def complete_alignment(fasta_path, output_path, all_taxa, missing_character):
+    records = parse_fasta(fasta_path)
+    normalized = OrderedDict()
+    for header, seq in records.items():
+        norm = normalize_taxon_name(header)
+        if norm in normalized:
+            raise RuntimeError(
+                "Duplicate normalized taxon name {} in {}".format(norm, fasta_path)
+            )
+        normalized[norm] = seq
+    lengths = {len(seq) for seq in normalized.values()}
+    if len(lengths) != 1:
+        raise RuntimeError("Alignment has inconsistent sequence lengths: {}".format(fasta_path))
+    alignment_length = next(iter(lengths)) if lengths else 0
+    missing_seq = missing_character * alignment_length
+    completed = OrderedDict()
+    added = []
+    for taxon in all_taxa:
+        if taxon in normalized:
+            completed[taxon] = normalized[taxon]
+        else:
+            completed[taxon] = missing_seq
+            added.append(taxon)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_fasta(output_path, completed)
+    return {
+        "input_taxa": len(normalized),
+        "output_taxa": len(completed),
+        "alignment_length": alignment_length,
+        "added_taxa_count": len(added),
+        "added_taxa_ids": ",".join(added),
+    }
+
+
+def write_summary(path, rows):
+    fieldnames = [
+        "threshold_group",
+        "filter_label",
+        "uce_locus",
+        "input_fasta",
+        "output_fasta",
+        "input_taxa",
+        "output_taxa",
+        "alignment_length",
+        "added_taxa_count",
+        "added_taxa_ids",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def write_manifest(path, rows):
+    fieldnames = [
+        "threshold_group",
+        "filter_label",
+        "total_files",
+        "files_with_added_taxa",
+        "all_taxa_count",
+        "output_dir",
+        "summary_path",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def main():
+    args = get_args()
+    all_taxa = read_all_taxa(args.aggregated_loci)
+    group_labels = threshold_groups(args.input_dir, args.threshold_groups)
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    all_rows = []
+    manifest_rows = []
+    for group in group_labels:
+        label_list = filter_labels(args.input_dir, group, args.filter_labels)
+        for label in label_list:
+            files = discover_alignments(args.input_dir, group, label)
+            combo_root = output_root / group / label
+            out_alignments = combo_root / "alignments"
+            summary_rows = []
+            files_with_added = 0
+            for fasta_path in files:
+                output_path = out_alignments / fasta_path.name
+                result = complete_alignment(
+                    fasta_path, output_path, all_taxa, args.missing_character
+                )
+                if result["added_taxa_count"] > 0:
+                    files_with_added += 1
+                summary_rows.append(
+                    {
+                        "threshold_group": group,
+                        "filter_label": label,
+                        "uce_locus": fasta_path.stem,
+                        "input_fasta": str(fasta_path),
+                        "output_fasta": str(output_path),
+                        "input_taxa": result["input_taxa"],
+                        "output_taxa": result["output_taxa"],
+                        "alignment_length": result["alignment_length"],
+                        "added_taxa_count": result["added_taxa_count"],
+                        "added_taxa_ids": result["added_taxa_ids"],
+                    }
+                )
+            summary_path = combo_root / "missing_data_summary.tsv"
+            write_summary(summary_path, summary_rows)
+            all_rows.extend(summary_rows)
+            manifest_rows.append(
+                {
+                    "threshold_group": group,
+                    "filter_label": label,
+                    "total_files": len(summary_rows),
+                    "files_with_added_taxa": files_with_added,
+                    "all_taxa_count": len(all_taxa),
+                    "output_dir": str(combo_root),
+                    "summary_path": str(summary_path),
+                }
+            )
+    write_manifest(output_root / "threshold_manifest.tsv", manifest_rows)
+    write_summary(output_root / "all_thresholds_missing_data_manifest.tsv", all_rows)
+    print(
+        "Added missing-data designators for {} threshold groups under {}".format(
+            len(group_labels), output_root
+        )
+    )
+    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+
+
+if __name__ == "__main__":
+    main()

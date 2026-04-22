@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+from collections import OrderedDict
+from pathlib import Path
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Concatenate locus alignments into supermatrices with partition "
+            "metadata."
+        )
+    )
+    parser.add_argument("--input-dir", required=True, help="Stage 12 directory.")
+    parser.add_argument("--output-dir", required=True, help="Directory for concatenated matrices.")
+    parser.add_argument(
+        "--threshold-groups",
+        default=None,
+        help="Optional comma-separated threshold groups to process.",
+    )
+    parser.add_argument(
+        "--filter-labels",
+        default=None,
+        help="Optional comma-separated filter labels or values to process.",
+    )
+    return parser.parse_args()
+
+
+def parse_fasta(path):
+    records = OrderedDict()
+    current = None
+    chunks = []
+    with open(path) as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if current is not None:
+                    records[current] = "".join(chunks)
+                current = line[1:].split()[0]
+                chunks = []
+            else:
+                chunks.append(line)
+    if current is not None:
+        records[current] = "".join(chunks)
+    return records
+
+
+def write_fasta(path, records):
+    with open(path, "w") as handle:
+        for header, seq in records.items():
+            handle.write(">{}\n".format(header))
+            handle.write("{}\n".format(seq))
+
+
+def write_phylip_relaxed(path, records):
+    taxa = len(records)
+    length = len(next(iter(records.values()))) if records else 0
+    with open(path, "w") as handle:
+        handle.write("{} {}\n".format(taxa, length))
+        for header, seq in records.items():
+            handle.write("{} {}\n".format(header, seq))
+
+
+def filter_label_from_value(value):
+    threshold = float(value)
+    if threshold <= 0 or threshold > 1:
+        raise RuntimeError("Filter label values must be > 0 and <= 1: {}".format(value))
+    if abs(threshold - 1.0) < 1e-9:
+        return "complete_matrix"
+    return "min_taxa_{:03d}".format(int(round(threshold * 100)))
+
+
+def threshold_groups(input_dir, requested):
+    input_root = Path(input_dir).resolve()
+    if requested:
+        labels = [item.strip() for item in requested.split(",") if item.strip()]
+        if not labels:
+            raise RuntimeError("No valid threshold groups were provided.")
+        return labels
+    labels = []
+    for path in sorted(input_root.iterdir()):
+        if path.is_dir():
+            labels.append(path.name)
+    if not labels:
+        raise RuntimeError("No threshold groups found under {}".format(input_root))
+    return labels
+
+
+def filter_labels(input_dir, threshold_group, requested):
+    group_root = Path(input_dir).resolve() / threshold_group
+    if requested:
+        labels = []
+        for item in requested.split(","):
+            value = item.strip()
+            if not value:
+                continue
+            if value == "complete_matrix" or value.startswith("min_taxa_"):
+                labels.append(value)
+            else:
+                labels.append(filter_label_from_value(value))
+        if not labels:
+            raise RuntimeError("No valid filter labels were provided.")
+        return labels
+    labels = []
+    for path in sorted(group_root.iterdir()):
+        if path.is_dir() and (path / "alignments").is_dir():
+            labels.append(path.name)
+    if not labels:
+        raise RuntimeError("No filter labels found under {}".format(group_root))
+    return labels
+
+
+def discover_alignments(input_dir, threshold_group, filter_label):
+    alignments_dir = Path(input_dir).resolve() / threshold_group / filter_label / "alignments"
+    if not alignments_dir.is_dir():
+        raise RuntimeError("Missing alignments directory: {}".format(alignments_dir))
+    files = sorted(alignments_dir.glob("*.fasta"))
+    if not files:
+        raise RuntimeError("No alignment FASTA files found under {}".format(alignments_dir))
+    return files
+
+
+def concatenate_combo(input_dir, output_dir, threshold_group, filter_label):
+    files = discover_alignments(input_dir, threshold_group, filter_label)
+    concat_root = Path(output_dir).resolve() / threshold_group / filter_label
+    concat_root.mkdir(parents=True, exist_ok=True)
+    taxa_order = None
+    concatenated = OrderedDict()
+    partitions = []
+    start = 1
+    for fasta_path in files:
+        records = parse_fasta(fasta_path)
+        current_taxa = list(records.keys())
+        if taxa_order is None:
+            taxa_order = current_taxa
+            concatenated = OrderedDict((taxon, "") for taxon in taxa_order)
+        elif current_taxa != taxa_order:
+            raise RuntimeError(
+                "Inconsistent taxon order or taxon set in {}".format(fasta_path)
+            )
+        lengths = {len(seq) for seq in records.values()}
+        if len(lengths) != 1:
+            raise RuntimeError(
+                "Inconsistent sequence lengths in {}".format(fasta_path)
+            )
+        locus_length = next(iter(lengths)) if lengths else 0
+        end = start + locus_length - 1
+        partitions.append(
+            {
+                "locus": fasta_path.stem,
+                "start": start,
+                "end": end,
+                "length": locus_length,
+            }
+        )
+        for taxon in taxa_order:
+            concatenated[taxon] += records[taxon]
+        start = end + 1
+    fasta_out = concat_root / "supermatrix.fasta"
+    phylip_out = concat_root / "supermatrix.phy"
+    charset_out = concat_root / "supermatrix.charsets.tsv"
+    write_fasta(fasta_out, concatenated)
+    write_phylip_relaxed(phylip_out, concatenated)
+    with open(charset_out, "w", newline="") as handle:
+        fieldnames = ["locus", "start", "end", "length"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in partitions:
+            writer.writerow(row)
+    return {
+        "threshold_group": threshold_group,
+        "filter_label": filter_label,
+        "loci_concatenated": len(files),
+        "taxa_count": len(taxa_order) if taxa_order else 0,
+        "supermatrix_length": len(next(iter(concatenated.values()))) if concatenated else 0,
+        "fasta_path": str(fasta_out),
+        "phylip_path": str(phylip_out),
+        "charset_path": str(charset_out),
+    }
+
+
+def write_manifest(path, rows):
+    fieldnames = [
+        "threshold_group",
+        "filter_label",
+        "loci_concatenated",
+        "taxa_count",
+        "supermatrix_length",
+        "fasta_path",
+        "phylip_path",
+        "charset_path",
+    ]
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def main():
+    args = get_args()
+    groups = threshold_groups(args.input_dir, args.threshold_groups)
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    manifest_rows = []
+    for group in groups:
+        labels = filter_labels(args.input_dir, group, args.filter_labels)
+        for label in labels:
+            manifest_rows.append(
+                concatenate_combo(args.input_dir, args.output_dir, group, label)
+            )
+    write_manifest(output_root / "threshold_manifest.tsv", manifest_rows)
+    print(
+        "Concatenated alignments for {} threshold groups under {}".format(
+            len(groups), output_root
+        )
+    )
+    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+
+
+if __name__ == "__main__":
+    main()
