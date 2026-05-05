@@ -9,22 +9,25 @@ from pathlib import Path
 from Bio import AlignIO
 
 
+DATASET_CHOICES = ("complete", "incomplete")
+
+
 def get_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Filter trimmed locus alignments by taxon completeness using the "
-            "same core rule as phyluce_align_get_only_loci_with_min_taxa."
+            "Finalize matrix completeness from stage 10 trimmed alignments using "
+            "the same core rule as phyluce_align_get_only_loci_with_min_taxa."
         )
     )
     parser.add_argument(
         "--input-dir",
         required=True,
-        help="Stage 10 directory containing threshold subdirectories.",
+        help="Stage 10 directory containing trimmed alignment branches.",
     )
     parser.add_argument(
         "--reference-dir",
         required=True,
-        help="Stage 09 directory used to recover the total expected taxa per threshold.",
+        help="Stage 09 directory used to recover the total expected taxa per dataset.",
     )
     parser.add_argument(
         "--output-dir",
@@ -35,20 +38,42 @@ def get_args():
         "--threshold-groups",
         default=None,
         help=(
-            "Optional comma-separated input threshold groups to process, e.g. "
-            "'complete_matrix,coverage_090'. Defaults to all groups found in "
-            "--input-dir."
+            "Optional dataset modes to process: 'complete', 'incomplete', or a "
+            "comma-separated combination. Defaults to all datasets found in --input-dir."
         ),
     )
     parser.add_argument(
         "--completeness-thresholds",
         default="1.0",
         help=(
-            "Comma-separated post-alignment completeness thresholds, e.g. "
-            "'1.0,0.9,0.75'."
+            "Comma-separated post-trim completeness thresholds, e.g. "
+            "'1.0,0.75,0.5'."
         ),
     )
     return parser.parse_args()
+
+
+def parse_dataset_modes(text):
+    if not text or str(text).strip().lower() == "all":
+        return None
+    labels = []
+    seen = set()
+    for item in text.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        if value not in DATASET_CHOICES:
+            raise RuntimeError(
+                "Unsupported dataset mode: {}. Expected one of {}".format(
+                    value, ", ".join(DATASET_CHOICES)
+                )
+            )
+        if value not in seen:
+            seen.add(value)
+            labels.append(value)
+    if not labels:
+        raise RuntimeError("No valid dataset modes were provided.")
+    return labels
 
 
 def parse_thresholds(text):
@@ -74,40 +99,18 @@ def parse_thresholds(text):
     return sorted(thresholds, reverse=True)
 
 
-def threshold_group_labels(input_dir, thresholds_text):
-    input_root = Path(input_dir).resolve()
-    if thresholds_text:
-        labels = [item.strip() for item in thresholds_text.split(",") if item.strip()]
-        if not labels:
-            raise RuntimeError("No valid threshold groups were provided.")
-        return labels
-    labels = []
-    for path in sorted(input_root.iterdir()):
-        if path.is_dir() and (path / "trimmed_alignments").is_dir():
-            labels.append(path.name)
-    if not labels:
-        raise RuntimeError(
-            "No threshold directories with trimmed_alignments/ found under {}".format(
-                input_root
-            )
-        )
-    return labels
-
-
 def completeness_label(threshold):
     if abs(threshold - 1.0) < 1e-9:
         return "complete_matrix"
     return "min_taxa_{:03d}".format(int(round(threshold * 100)))
 
 
-def read_total_taxa(reference_dir, threshold_group):
-    summary_path = (
-        Path(reference_dir).resolve() / threshold_group / "alignment_summary.tsv"
-    )
+def read_total_taxa(reference_dir, dataset_label):
+    summary_path = Path(reference_dir).resolve() / dataset_label / "alignment_summary.tsv"
     if not summary_path.is_file():
         raise RuntimeError(
             "Missing stage 09 alignment summary for {}: {}".format(
-                threshold_group, summary_path
+                dataset_label, summary_path
             )
         )
     total_taxa = None
@@ -126,13 +129,90 @@ def read_total_taxa(reference_dir, threshold_group):
     return total_taxa
 
 
-def discover_trimmed_alignments(input_dir, threshold_group):
-    alignments_dir = Path(input_dir).resolve() / threshold_group / "trimmed_alignments"
-    if not alignments_dir.is_dir():
-        raise RuntimeError("Missing trimmed_alignments directory: {}".format(alignments_dir))
-    files = sorted(alignments_dir.glob("*.fasta"))
+def discover_trimmed_branches(input_dir, requested_datasets):
+    input_root = Path(input_dir).resolve()
+    manifest_path = input_root / "threshold_manifest.tsv"
+    branches = []
+    seen = set()
+
+    if manifest_path.is_file():
+        with open(manifest_path, newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            required = {"trim_mode", "dataset_label", "output_dir"}
+            if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+                raise RuntimeError(
+                    "Unexpected stage 10 manifest schema in {}".format(manifest_path)
+                )
+            for row in reader:
+                dataset_label = row["dataset_label"].strip()
+                if requested_datasets is not None and dataset_label not in requested_datasets:
+                    continue
+                trim_mode = row["trim_mode"].strip()
+                dataset_output = Path(row["output_dir"]).resolve()
+                trimmed_dir = dataset_output / "trimmed_alignments"
+                if not trimmed_dir.is_dir():
+                    continue
+                key = (trim_mode, dataset_label, str(dataset_output))
+                if key in seen:
+                    continue
+                seen.add(key)
+                branches.append(
+                    {
+                        "trim_mode": trim_mode,
+                        "dataset_label": dataset_label,
+                        "dataset_output": dataset_output,
+                        "trimmed_dir": trimmed_dir,
+                        "compatibility_mode": dataset_output.parent == input_root,
+                    }
+                )
+
+    if branches:
+        return sorted(branches, key=lambda row: (row["trim_mode"], row["dataset_label"]))
+
+    for path in sorted(input_root.iterdir()):
+        if not path.is_dir():
+            continue
+        if (path / "trimmed_alignments").is_dir():
+            dataset_label = path.name
+            if requested_datasets is not None and dataset_label not in requested_datasets:
+                continue
+            branches.append(
+                {
+                    "trim_mode": "unspecified",
+                    "dataset_label": dataset_label,
+                    "dataset_output": path,
+                    "trimmed_dir": path / "trimmed_alignments",
+                    "compatibility_mode": True,
+                }
+            )
+            continue
+        for child in sorted(path.iterdir()):
+            if not child.is_dir() or not (child / "trimmed_alignments").is_dir():
+                continue
+            dataset_label = child.name
+            if requested_datasets is not None and dataset_label not in requested_datasets:
+                continue
+            branches.append(
+                {
+                    "trim_mode": path.name,
+                    "dataset_label": dataset_label,
+                    "dataset_output": child,
+                    "trimmed_dir": child / "trimmed_alignments",
+                    "compatibility_mode": False,
+                }
+            )
+
+    if not branches:
+        raise RuntimeError(
+            "No trimmed alignment branches found under {}".format(input_root)
+        )
+    return sorted(branches, key=lambda row: (row["trim_mode"], row["dataset_label"]))
+
+
+def discover_trimmed_alignments(trimmed_dir):
+    files = sorted(Path(trimmed_dir).glob("*.fasta"))
     if not files:
-        raise RuntimeError("No trimmed alignment FASTA files found under {}".format(alignments_dir))
+        raise RuntimeError("No trimmed alignment FASTA files found under {}".format(trimmed_dir))
     return files
 
 
@@ -141,14 +221,27 @@ def alignment_taxa(path):
     return len(aln)
 
 
-def copy_alignments_for_threshold(input_dir, reference_dir, output_dir, threshold_group, completeness_threshold):
-    total_taxa = read_total_taxa(reference_dir, threshold_group)
+def output_combo_root(output_dir, branch, filter_label):
+    output_root = Path(output_dir).resolve()
+    if branch["compatibility_mode"]:
+        return output_root / branch["dataset_label"] / filter_label
+    return output_root / branch["trim_mode"] / branch["dataset_label"] / filter_label
+
+
+def branch_group_label(branch):
+    if branch["compatibility_mode"]:
+        return branch["dataset_label"]
+    return "{}/{}".format(branch["trim_mode"], branch["dataset_label"])
+
+
+def copy_alignments_for_branch(reference_dir, output_dir, branch, completeness_threshold):
+    total_taxa = read_total_taxa(reference_dir, branch["dataset_label"])
     min_count = int(math.floor(completeness_threshold * total_taxa))
     if min_count < 1:
         min_count = 1
-    files = discover_trimmed_alignments(input_dir, threshold_group)
+    files = discover_trimmed_alignments(branch["trimmed_dir"])
     filter_label = completeness_label(completeness_threshold)
-    combo_root = Path(output_dir).resolve() / threshold_group / filter_label
+    combo_root = output_combo_root(output_dir, branch, filter_label)
     out_alignments = combo_root / "alignments"
     out_alignments.mkdir(parents=True, exist_ok=True)
     summary_rows = []
@@ -162,7 +255,9 @@ def copy_alignments_for_threshold(input_dir, reference_dir, output_dir, threshol
             kept += 1
         summary_rows.append(
             {
-                "threshold_group": threshold_group,
+                "trim_mode": branch["trim_mode"],
+                "dataset_label": branch["dataset_label"],
+                "threshold_group": branch_group_label(branch),
                 "completeness_threshold": "{:.4f}".format(completeness_threshold),
                 "filter_label": filter_label,
                 "uce_locus": path.stem,
@@ -177,7 +272,9 @@ def copy_alignments_for_threshold(input_dir, reference_dir, output_dir, threshol
     summary_path = combo_root / "filter_summary.tsv"
     write_filter_summary(summary_path, summary_rows)
     return {
-        "threshold_group": threshold_group,
+        "trim_mode": branch["trim_mode"],
+        "dataset_label": branch["dataset_label"],
+        "threshold_group": branch_group_label(branch),
         "completeness_threshold": "{:.4f}".format(completeness_threshold),
         "filter_label": filter_label,
         "total_taxa": total_taxa,
@@ -192,6 +289,8 @@ def copy_alignments_for_threshold(input_dir, reference_dir, output_dir, threshol
 
 def write_filter_summary(path, rows):
     fieldnames = [
+        "trim_mode",
+        "dataset_label",
         "threshold_group",
         "completeness_threshold",
         "filter_label",
@@ -212,6 +311,8 @@ def write_filter_summary(path, rows):
 
 def write_manifest(path, rows):
     fieldnames = [
+        "trim_mode",
+        "dataset_label",
         "threshold_group",
         "completeness_threshold",
         "filter_label",
@@ -232,20 +333,20 @@ def write_manifest(path, rows):
 
 def main():
     args = get_args()
-    groups = threshold_group_labels(args.input_dir, args.threshold_groups)
+    requested_datasets = parse_dataset_modes(args.threshold_groups)
     completeness_thresholds = parse_thresholds(args.completeness_thresholds)
+    branches = discover_trimmed_branches(args.input_dir, requested_datasets)
     output_root = Path(args.output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     manifest_rows = []
     all_rows = []
-    for group in groups:
+    for branch in branches:
         for completeness_threshold in completeness_thresholds:
-            manifest_row, summary_rows = copy_alignments_for_threshold(
-                args.input_dir,
+            manifest_row, summary_rows = copy_alignments_for_branch(
                 args.reference_dir,
                 args.output_dir,
-                group,
+                branch,
                 completeness_threshold,
             )
             manifest_rows.append(manifest_row)
@@ -254,8 +355,8 @@ def main():
     write_manifest(output_root / "threshold_manifest.tsv", manifest_rows)
     write_filter_summary(output_root / "all_thresholds_filter_manifest.tsv", all_rows)
     print(
-        "Filtered trimmed locus alignments for {} threshold groups across {} completeness thresholds under {}".format(
-            len(groups), len(completeness_thresholds), output_root
+        "Finalized matrix completeness for {} trimmed branches across {} thresholds under {}".format(
+            len(branches), len(completeness_thresholds), output_root
         )
     )
     print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))

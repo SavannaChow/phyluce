@@ -271,6 +271,20 @@ def align_dataset(input_dir, output_dir, dataset_label, jobs, matrix_mode, allow
         else:
             pending.append((prefiltered_path, output_path, locus_row))
 
+    ready_count = len(pending)
+    dropped_count = sum(1 for row in summary_rows if row["status"] == "dropped")
+    existing_count = sum(1 for row in summary_rows if row["status"] == "existing")
+    print(
+        "[stage9:{}] {} loci total; {} ready for MAFFT, {} existing, {} dropped in prefilter".format(
+            dataset_label,
+            len(fasta_files),
+            ready_count,
+            existing_count,
+            dropped_count,
+        ),
+        flush=True,
+    )
+
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
         futures = {
             executor.submit(run_mafft, prefiltered_path, output_path, mafft_path): (
@@ -280,12 +294,22 @@ def align_dataset(input_dir, output_dir, dataset_label, jobs, matrix_mode, allow
             )
             for prefiltered_path, output_path, locus_row in pending
         }
+        completed = 0
+        progress_interval = max(1, min(25, ready_count // 10 if ready_count else 1))
         for future in as_completed(futures):
             _, _, locus_row = futures[future]
             future.result()
             locus_row["status"] = "aligned"
             locus_row["reason"] = ""
             summary_rows.append(locus_row)
+            completed += 1
+            if completed == ready_count or completed % progress_interval == 0:
+                print(
+                    "[stage9:{}] MAFFT progress {}/{}".format(
+                        dataset_label, completed, ready_count
+                    ),
+                    flush=True,
+                )
 
     summary_rows.sort(key=lambda row: row["uce_locus"])
     return summary_rows
@@ -342,6 +366,7 @@ def main():
     all_rows = []
     dataset_rows = []
     for dataset_label in dataset_labels:
+        print("[stage9:{}] starting alignment".format(dataset_label), flush=True)
         summary_rows = align_dataset(
             args.input_dir,
             args.output_dir,
@@ -368,6 +393,7 @@ def main():
                 "summary_path": str(summary_path),
             }
         )
+        print("[stage9:{}] alignment complete".format(dataset_label), flush=True)
 
     write_alignment_summary(output_root / "all_datasets_alignment_manifest.tsv", all_rows)
     write_dataset_summary(output_root / "dataset_manifest.tsv", dataset_rows)

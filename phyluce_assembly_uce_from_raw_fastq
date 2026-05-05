@@ -2273,10 +2273,10 @@ def main():
             if settings["gblocks_path"] and settings["gblocks_path"] != "Gblocks"
             else require_executable(["Gblocks", "gblocks"])
         )
-    if settings["trim_mode"] == "both" and (args.end_stage >= 11):
+    if settings["trim_mode"] == "both" and (args.end_stage >= 12):
         raise RuntimeError(
-            "trim_mode=both is available for Stage 10, but stages 11-13 do not yet "
-            "consume both trim branches. Re-run with --end-stage 10, or use "
+            "trim_mode=both is available through Stage 11, but stages 12-13 do not yet "
+            "consume both trim branches. Re-run with --end-stage 11, or use "
             "--trim-mode edge/internal/none."
         )
     decompressor = shutil.which("pigz") or shutil.which("gzip")
