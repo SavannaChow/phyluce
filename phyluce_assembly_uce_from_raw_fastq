@@ -150,11 +150,12 @@ def get_args():
         help="Flanking bases to add on each side when --extract-mode slice is used.",
     )
     parser.add_argument(
-        "--locus-thresholds",
-        default="1.0",
+        "--dataset-modes",
+        default="complete,incomplete",
         help=(
-            "Comma-separated minimum sample proportions for stage 8 export, "
-            "e.g. '1.0,0.9,0.75'."
+            "Comma-separated dataset modes for stage 8 export. "
+            "Accepts 'complete', 'incomplete', 'complete_matrix', or "
+            "'incomplete_matrix'."
         ),
     )
     parser.add_argument(
@@ -761,21 +762,21 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     else:
         settings["flank"] = flank_default
 
-    saved_locus_thresholds = project_info.get("locus_thresholds")
-    locus_thresholds_default = (
-        saved_locus_thresholds
-        if saved_locus_thresholds not in (None, "N/A")
-        else args.locus_thresholds
+    saved_dataset_modes = project_info.get("dataset_modes")
+    dataset_modes_default = (
+        saved_dataset_modes
+        if saved_dataset_modes not in (None, "N/A")
+        else args.dataset_modes
     )
-    if 8 in selected_stages and not cli_flag_present("--locus-thresholds"):
-        settings["locus_thresholds"] = prompt_text_with_default(
-            "Stage 8 locus thresholds", locus_thresholds_default
+    if 8 in selected_stages and not cli_flag_present("--dataset-modes"):
+        settings["dataset_modes"] = prompt_text_with_default(
+            "Stage 8 dataset modes", dataset_modes_default
         )
     else:
-        settings["locus_thresholds"] = (
-            args.locus_thresholds
-            if cli_flag_present("--locus-thresholds")
-            else locus_thresholds_default
+        settings["dataset_modes"] = (
+            args.dataset_modes
+            if cli_flag_present("--dataset-modes")
+            else dataset_modes_default
         )
 
     saved_align_thresholds = project_info.get("align_thresholds")
@@ -1417,18 +1418,20 @@ def build_aggregate_command(aggregate_script, filter_root, aggregate_root, prefi
     ]
 
 
-def build_export_locus_fastas_command(export_script, aggregate_root, extract_root, output_root, prefix, thresholds):
+def build_export_locus_fastas_command(export_script, aggregate_root, extract_root, output_root, prefix, dataset_modes):
     return [
         sys.executable,
         str(export_script),
-        "--aggregated-loci",
-        str(aggregate_root / "{}.filtered.loci.tsv".format(prefix)),
+        "--aggregate-dir",
+        str(aggregate_root),
         "--extract-dir",
         str(extract_root),
         "--output-dir",
         str(output_root),
-        "--thresholds",
-        str(thresholds),
+        "--prefix",
+        str(prefix),
+        "--dataset-modes",
+        str(dataset_modes),
     ]
 
 
@@ -1586,12 +1589,12 @@ def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger,
     )
 
 
-def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_root, prefix, thresholds, logger, log_root):
+def run_export_locus_fastas(export_script, aggregate_root, extract_root, output_root, prefix, dataset_modes, logger, log_root):
     output_root.mkdir(parents=True, exist_ok=True)
     command = build_export_locus_fastas_command(
-        export_script, aggregate_root, extract_root, output_root, prefix, thresholds
+        export_script, aggregate_root, extract_root, output_root, prefix, dataset_modes
     )
-    logger.info("Exporting one FASTA per UCE locus")
+    logger.info("Materializing stage 8 dataset FASTAs")
     stream_process(
         command,
         logger,
@@ -1784,7 +1787,7 @@ def print_dry_run_plan(
     )
     print("Extract mode: {}".format(args.extract_mode))
     print("Flank: {}".format(args.flank))
-    print("Stage 8 locus thresholds: {}".format(args.locus_thresholds))
+    print("Stage 8 dataset modes: {}".format(args.dataset_modes))
     print("Stage 9 align thresholds: {}".format(args.align_thresholds))
     print("Stage 9 ambiguous bases: {}".format("keep" if args.align_ambiguous else "drop"))
     print("Stage 9 matrix mode: {}".format(args.align_matrix_mode))
@@ -1978,20 +1981,20 @@ def print_dry_run_plan(
                         stage_dirs["06_extract_uce_fasta_from_hits"],
                         stage_dirs["08_Export_Locus_FASTAs"],
                         project_id,
-                        args.locus_thresholds,
+                        args.dataset_modes,
                     )
                 )
             )
         )
         print("  planned outputs:")
         print(
-            "    threshold manifest: {}".format(
-                stage_dirs["08_Export_Locus_FASTAs"] / "threshold_manifest.tsv"
+            "    dataset manifest: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "dataset_manifest.tsv"
             )
         )
         print(
-            "    all-threshold manifest: {}".format(
-                stage_dirs["08_Export_Locus_FASTAs"] / "all_thresholds_locus_fasta_manifest.tsv"
+            "    all-datasets manifest: {}".format(
+                stage_dirs["08_Export_Locus_FASTAs"] / "all_datasets_locus_fasta_manifest.tsv"
             )
         )
         print("")
@@ -2257,7 +2260,7 @@ def main():
                 ("min_coverage", settings["min_coverage"]),
                 ("extract_mode", settings["extract_mode"]),
                 ("flank", settings["flank"]),
-                ("locus_thresholds", settings["locus_thresholds"]),
+                ("dataset_modes", settings["dataset_modes"]),
                 ("align_thresholds", settings["align_thresholds"]),
                 ("align_ambiguous", settings["align_ambiguous"]),
                 ("align_matrix_mode", settings["align_matrix_mode"]),
@@ -2289,7 +2292,7 @@ def main():
             "min_coverage": settings["min_coverage"],
             "extract_mode": settings["extract_mode"],
             "flank": settings["flank"],
-            "locus_thresholds": settings["locus_thresholds"],
+            "dataset_modes": settings["dataset_modes"],
             "align_thresholds": settings["align_thresholds"],
             "align_ambiguous": settings["align_ambiguous"],
             "align_matrix_mode": settings["align_matrix_mode"],
@@ -2410,7 +2413,7 @@ def main():
             stage_dirs["06_extract_uce_fasta_from_hits"],
             stage_dirs["08_Export_Locus_FASTAs"],
             project_id,
-            settings["locus_thresholds"],
+            settings["dataset_modes"],
             logger,
             stage_dirs["00_Log"],
         )

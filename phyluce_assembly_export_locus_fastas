@@ -2,35 +2,29 @@
 
 import argparse
 import csv
-import os
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 
-AGGREGATE_REQUIRED_FIELDS = {
-    "sample_id",
-    "uce_locus",
-    "target_name",
-    "target_start",
-    "target_end",
-    "strand",
-    "probe_hit_count",
-    "query_names",
-    "filtered_loci_path",
+DATASET_CHOICES = {
+    "complete": "complete_matrix",
+    "incomplete": "incomplete_matrix",
+    "complete_matrix": "complete_matrix",
+    "incomplete_matrix": "incomplete_matrix",
 }
 
 
 def get_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Export one FASTA per UCE locus from aggregated loci tables and "
-            "sample-level extracted FASTA files."
+            "Materialize complete and/or incomplete dataset FASTAs from stage 07 "
+            "aggregate outputs and stage 06 extracted sample FASTAs."
         )
     )
     parser.add_argument(
-        "--aggregated-loci",
+        "--aggregate-dir",
         required=True,
-        help="Aggregated long-format loci table from stage 07.",
+        help="Stage 07 aggregate directory containing *.manifest.tsv outputs.",
     )
     parser.add_argument(
         "--extract-dir",
@@ -40,65 +34,49 @@ def get_args():
     parser.add_argument(
         "--output-dir",
         required=True,
-        help="Directory for per-locus FASTA outputs.",
+        help="Directory for dataset FASTA outputs.",
+    )
+    parser.add_argument(
+        "--prefix",
+        required=True,
+        help="Filename prefix shared by the stage 07 aggregate outputs.",
+    )
+    parser.add_argument(
+        "--dataset-modes",
+        default="complete,incomplete",
+        help=(
+            "Comma-separated dataset modes to materialize. Accepts "
+            "'complete', 'incomplete', 'complete_matrix', or 'incomplete_matrix'."
+        ),
     )
     parser.add_argument(
         "--sample-fasta-suffix",
         default=".filtered.fasta",
         help="Filename suffix used for per-sample FASTA files in --extract-dir.",
     )
-    parser.add_argument(
-        "--thresholds",
-        default="1.0",
-        help=(
-            "Comma-separated minimum sample proportions to export, e.g. "
-            "'1.0,0.9,0.75'. 1.0 corresponds to a complete matrix."
-        ),
-    )
     return parser.parse_args()
 
 
-def load_aggregated_loci(path):
-    rows = []
-    with open(path, newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        if reader.fieldnames is None or not AGGREGATE_REQUIRED_FIELDS.issubset(
-            set(reader.fieldnames)
-        ):
-            raise RuntimeError("Unexpected aggregated loci schema in {}".format(path))
-        for row in reader:
-            rows.append(
-                {
-                    "sample_id": row["sample_id"].strip(),
-                    "uce_locus": row["uce_locus"].strip(),
-                }
-            )
-    if not rows:
-        raise RuntimeError("No loci rows found in {}".format(path))
-    return rows
-
-
-def parse_thresholds(text):
-    thresholds = []
+def parse_dataset_modes(text):
+    labels = []
     seen = set()
     for item in text.split(","):
         value = item.strip()
         if not value:
             continue
-        threshold = float(value)
-        if threshold <= 0 or threshold > 1:
+        if value not in DATASET_CHOICES:
             raise RuntimeError(
-                "Threshold values must be > 0 and <= 1. Invalid value: {}".format(
-                    value
+                "Unsupported dataset mode: {}. Expected one of {}".format(
+                    value, ", ".join(sorted(DATASET_CHOICES))
                 )
             )
-        key = round(threshold, 6)
-        if key not in seen:
-            seen.add(key)
-            thresholds.append(threshold)
-    if not thresholds:
-        raise RuntimeError("No valid thresholds were provided.")
-    return sorted(thresholds, reverse=True)
+        label = DATASET_CHOICES[value]
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    if not labels:
+        raise RuntimeError("No valid dataset modes were provided.")
+    return labels
 
 
 def parse_fasta(path):
@@ -150,123 +128,47 @@ def build_sequence_index(extract_dir, suffix):
                         key, path
                     )
                 )
-            index[key] = sequence
+            index[key] = {"header": header, "sequence": sequence}
     return index
 
 
-def threshold_label(threshold):
-    if abs(threshold - 1.0) < 1e-9:
-        return "complete_matrix"
-    return "coverage_{:03d}".format(int(round(threshold * 100)))
-
-
-def read_summary(path):
-    if not Path(path).is_file():
-        return []
+def read_dataset_manifest(path):
+    rows = []
     with open(path, newline="") as handle:
-        return list(csv.DictReader(handle, delimiter="\t"))
-
-
-def read_threshold_summary(path):
-    if not Path(path).is_file():
-        return []
-    with open(path, newline="") as handle:
-        return list(csv.DictReader(handle, delimiter="\t"))
-
-
-def write_locus_fastas(rows, sequence_index, output_dir, thresholds):
-    grouped = defaultdict(list)
-    for row in rows:
-        grouped[row["uce_locus"]].append(row["sample_id"])
-
-    output_root = Path(output_dir).resolve()
-    output_root.mkdir(parents=True, exist_ok=True)
-    total_samples = len({row["sample_id"] for row in rows})
-    all_summary_rows = read_summary(
-        output_root / "all_thresholds_locus_fasta_manifest.tsv"
-    ) or read_summary(output_root / "all_thresholds_locus_fasta_summary.tsv")
-    threshold_summary_rows = read_threshold_summary(
-        output_root / "threshold_manifest.tsv"
-    ) or read_threshold_summary(output_root / "threshold_summary.tsv")
-    existing_threshold_labels = {
-        row["threshold_label"] for row in threshold_summary_rows
-    }
-
-    for threshold in thresholds:
-        kept = 0
-        label = threshold_label(threshold)
-        threshold_dir = output_root / label
-        if label in existing_threshold_labels:
-            continue
-        loci_root = threshold_dir / "loci"
-        loci_root.mkdir(parents=True, exist_ok=True)
-        summary_rows = []
-        for locus in sorted(grouped):
-            samples = sorted(grouped[locus])
-            present_proportion = len(samples) / float(total_samples) if total_samples else 0.0
-            if present_proportion + 1e-12 < threshold:
-                continue
-            found = []
-            missing = []
-            for sample_id in samples:
-                key = (sample_id, locus)
-                sequence = sequence_index.get(key)
-                if sequence is None:
-                    missing.append(sample_id)
-                else:
-                    found.append((sample_id, sequence))
-            fasta_path = loci_root / "{}.fasta".format(locus)
-            with open(fasta_path, "w") as handle:
-                for sample_id, sequence in found:
-                    handle.write(">{}\n".format(sample_id))
-                    handle.write("{}\n".format(sequence))
-            summary_rows.append(
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"dataset_mode", "sample_id", "uce_locus"}
+        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+            raise RuntimeError("Unexpected dataset manifest schema in {}".format(path))
+        for row in reader:
+            rows.append(
                 {
-                    "threshold": "{:.4f}".format(threshold),
-                    "threshold_label": label,
-                    "uce_locus": locus,
-                    "samples_in_aggregate": len(samples),
-                    "total_samples": total_samples,
-                    "sample_proportion": "{:.4f}".format(present_proportion),
-                    "sequences_written": len(found),
-                    "missing_sequences": len(missing),
-                    "sample_ids_present": ",".join(sample for sample, _ in found),
-                    "sample_ids_missing": ",".join(missing),
-                    "fasta_path": str(fasta_path),
+                    "dataset_mode": row["dataset_mode"].strip(),
+                    "sample_id": row["sample_id"].strip(),
+                    "uce_locus": row["uce_locus"].strip(),
                 }
             )
-            kept += 1
-        summary_path = threshold_dir / "locus_fasta_summary.tsv"
-        write_summary(summary_path, summary_rows)
-        write_summary(output_root / "{}.locus_fasta_summary.tsv".format(label), summary_rows)
-        all_summary_rows.extend(summary_rows)
-        threshold_summary_rows.append(
-            {
-                "threshold": "{:.4f}".format(threshold),
-                "threshold_label": label,
-                "loci_kept": kept,
-                "output_dir": str(threshold_dir),
-                "summary_path": str(summary_path),
-            }
-        )
-    all_summary_rows.sort(key=lambda row: (row["threshold_label"], row["uce_locus"]))
-    threshold_summary_rows.sort(key=lambda row: row["threshold_label"])
-    return all_summary_rows, threshold_summary_rows
+    if not rows:
+        raise RuntimeError("No dataset rows found in {}".format(path))
+    return rows
 
 
-def write_summary(path, rows):
+def write_fasta(path, records):
+    with open(path, "w") as handle:
+        for header, sequence in records.items():
+            handle.write(">{}\n".format(header))
+            handle.write("{}\n".format(sequence))
+
+
+def write_dataset_summary(path, rows):
     fieldnames = [
-        "threshold",
-        "threshold_label",
+        "dataset_mode",
         "uce_locus",
-        "samples_in_aggregate",
-        "total_samples",
-        "sample_proportion",
+        "samples_expected",
         "sequences_written",
         "missing_sequences",
         "sample_ids_present",
         "sample_ids_missing",
-        "fasta_path",
+        "locus_fasta_path",
     ]
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
@@ -275,12 +177,13 @@ def write_summary(path, rows):
             writer.writerow(row)
 
 
-def write_threshold_summary(path, rows):
+def write_dataset_manifest_summary(path, rows):
     fieldnames = [
-        "threshold",
-        "threshold_label",
-        "loci_kept",
-        "output_dir",
+        "dataset_mode",
+        "dataset_label",
+        "loci_written",
+        "monolithic_fasta",
+        "loci_dir",
         "summary_path",
     ]
     with open(path, "w", newline="") as handle:
@@ -290,27 +193,90 @@ def write_threshold_summary(path, rows):
             writer.writerow(row)
 
 
+def materialize_dataset(dataset_label, rows, sequence_index, output_root):
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[row["uce_locus"]].append(row["sample_id"])
+
+    dataset_root = Path(output_root).resolve() / dataset_label
+    loci_root = dataset_root / "loci"
+    loci_root.mkdir(parents=True, exist_ok=True)
+    monolithic_path = dataset_root / "{}.fasta".format(dataset_label)
+    summary_path = dataset_root / "locus_fasta_summary.tsv"
+
+    monolithic_records = OrderedDict()
+    summary_rows = []
+    for locus in sorted(grouped):
+        samples = sorted(grouped[locus])
+        locus_records = OrderedDict()
+        missing = []
+        for sample_id in samples:
+            key = (sample_id, locus)
+            record = sequence_index.get(key)
+            if record is None:
+                missing.append(sample_id)
+                continue
+            locus_records[record["header"]] = record["sequence"]
+            monolithic_records[record["header"]] = record["sequence"]
+        locus_fasta_path = loci_root / "{}.fasta".format(locus)
+        write_fasta(locus_fasta_path, locus_records)
+        summary_rows.append(
+            {
+                "dataset_mode": dataset_label,
+                "uce_locus": locus,
+                "samples_expected": len(samples),
+                "sequences_written": len(locus_records),
+                "missing_sequences": len(missing),
+                "sample_ids_present": ",".join(
+                    sample_id for sample_id in samples if sample_id not in missing
+                ),
+                "sample_ids_missing": ",".join(missing),
+                "locus_fasta_path": str(locus_fasta_path),
+            }
+        )
+
+    write_fasta(monolithic_path, monolithic_records)
+    write_dataset_summary(summary_path, summary_rows)
+    return {
+        "dataset_mode": dataset_label,
+        "dataset_label": dataset_label,
+        "loci_written": len(summary_rows),
+        "monolithic_fasta": str(monolithic_path),
+        "loci_dir": str(loci_root),
+        "summary_path": str(summary_path),
+    }, summary_rows
+
+
 def main():
     args = get_args()
-    rows = load_aggregated_loci(args.aggregated_loci)
-    thresholds = parse_thresholds(args.thresholds)
+    aggregate_root = Path(args.aggregate_dir).resolve()
+    output_root = Path(args.output_dir).resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
     sequence_index = build_sequence_index(args.extract_dir, args.sample_fasta_suffix)
-    summary_rows, threshold_summary_rows = write_locus_fastas(
-        rows, sequence_index, args.output_dir, thresholds
-    )
-    summary_path = (
-        Path(args.output_dir).resolve() / "all_thresholds_locus_fasta_manifest.tsv"
-    )
-    threshold_summary_path = Path(args.output_dir).resolve() / "threshold_manifest.tsv"
-    write_summary(summary_path, summary_rows)
-    write_threshold_summary(threshold_summary_path, threshold_summary_rows)
+    dataset_modes = parse_dataset_modes(args.dataset_modes)
+
+    manifest_rows = []
+    all_rows = []
+    for dataset_label in dataset_modes:
+        manifest_path = aggregate_root / "{}.{}.manifest.tsv".format(
+            args.prefix, "complete" if dataset_label == "complete_matrix" else "incomplete"
+        )
+        rows = read_dataset_manifest(manifest_path)
+        manifest_row, summary_rows = materialize_dataset(
+            dataset_label, rows, sequence_index, output_root
+        )
+        manifest_rows.append(manifest_row)
+        all_rows.extend(summary_rows)
+
+    write_dataset_summary(output_root / "all_datasets_locus_fasta_manifest.tsv", all_rows)
+    write_dataset_manifest_summary(output_root / "dataset_manifest.tsv", manifest_rows)
     print(
-        "Exported locus FASTA files for {} thresholds under {}".format(
-            len(thresholds), Path(args.output_dir).resolve()
+        "Materialized {} datasets under {}".format(
+            len(dataset_modes), output_root
         )
     )
-    print("manifest\t{}".format(summary_path))
-    print("threshold_manifest\t{}".format(threshold_summary_path))
+    print("manifest\t{}".format(output_root / "all_datasets_locus_fasta_manifest.tsv"))
+    print("dataset_manifest\t{}".format(output_root / "dataset_manifest.tsv"))
 
 
 if __name__ == "__main__":
