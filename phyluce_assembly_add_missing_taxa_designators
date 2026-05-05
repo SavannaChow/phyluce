@@ -2,15 +2,20 @@
 
 import argparse
 import csv
+import shutil
 from collections import OrderedDict
 from pathlib import Path
+
+
+DATASET_CHOICES = ("complete", "incomplete")
+BRANCH_CHOICES = ("supermatrix", "gene-tree")
 
 
 def get_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Add missing-data designators to filtered locus alignments so each "
-            "alignment has the same taxon set."
+            "Dispatch finalized Stage 11 locus alignments into supermatrix and/or "
+            "gene-tree analysis branches."
         )
     )
     parser.add_argument("--input-dir", required=True, help="Stage 11 directory.")
@@ -19,11 +24,14 @@ def get_args():
         required=True,
         help="Stage 07 aggregated long-format loci table used to recover all sample IDs.",
     )
-    parser.add_argument("--output-dir", required=True, help="Directory for completed alignments.")
+    parser.add_argument("--output-dir", required=True, help="Directory for Stage 12 analysis branches.")
     parser.add_argument(
         "--threshold-groups",
         default=None,
-        help="Optional comma-separated input threshold groups to process.",
+        help=(
+            "Optional dataset modes or threshold-group labels to process. Accepts "
+            "'complete', 'incomplete', 'all', or specific Stage 11 threshold_group labels."
+        ),
     )
     parser.add_argument(
         "--filter-labels",
@@ -34,9 +42,14 @@ def get_args():
         ),
     )
     parser.add_argument(
+        "--analysis-branches",
+        default="both",
+        help="Analysis branches to produce: 'supermatrix', 'gene-tree', or 'both'.",
+    )
+    parser.add_argument(
         "--missing-character",
         default="?",
-        help="Character to use for missing data designators.",
+        help="Character to use for missing data designators in the supermatrix branch.",
     )
     return parser.parse_args()
 
@@ -75,6 +88,30 @@ def normalize_taxon_name(name):
     return name
 
 
+def parse_analysis_branches(text):
+    value = (text or "both").strip().lower()
+    if value == "both":
+        return list(BRANCH_CHOICES)
+    branches = []
+    seen = set()
+    for item in value.split(","):
+        branch = item.strip().lower()
+        if not branch:
+            continue
+        if branch not in BRANCH_CHOICES:
+            raise RuntimeError(
+                "Unsupported analysis branch: {}. Expected one of {}".format(
+                    branch, ", ".join(BRANCH_CHOICES + ("both",))
+                )
+            )
+        if branch not in seen:
+            seen.add(branch)
+            branches.append(branch)
+    if not branches:
+        raise RuntimeError("No valid analysis branches were provided.")
+    return branches
+
+
 def read_all_taxa(aggregated_loci):
     taxa = []
     seen = set()
@@ -92,22 +129,6 @@ def read_all_taxa(aggregated_loci):
     return sorted(taxa)
 
 
-def threshold_groups(input_dir, requested):
-    input_root = Path(input_dir).resolve()
-    if requested:
-        labels = [item.strip() for item in requested.split(",") if item.strip()]
-        if not labels:
-            raise RuntimeError("No valid threshold groups were provided.")
-        return labels
-    labels = []
-    for path in sorted(input_root.iterdir()):
-        if path.is_dir():
-            labels.append(path.name)
-    if not labels:
-        raise RuntimeError("No threshold groups found under {}".format(input_root))
-    return labels
-
-
 def filter_label_from_value(value):
     threshold = float(value)
     if threshold <= 0 or threshold > 1:
@@ -117,32 +138,110 @@ def filter_label_from_value(value):
     return "min_taxa_{:03d}".format(int(round(threshold * 100)))
 
 
-def filter_labels(input_dir, threshold_group, requested):
-    group_root = Path(input_dir).resolve() / threshold_group
-    if requested:
-        labels = []
-        for item in requested.split(","):
-            value = item.strip()
-            if not value:
-                continue
-            if value == "complete_matrix" or value.startswith("min_taxa_"):
-                labels.append(value)
-            else:
-                labels.append(filter_label_from_value(value))
-        if not labels:
-            raise RuntimeError("No valid filter labels were provided.")
-        return labels
+def parse_filter_labels(requested):
+    if not requested or str(requested).strip().lower() == "all":
+        return None
     labels = []
-    for path in sorted(group_root.iterdir()):
-        if path.is_dir() and (path / "alignments").is_dir():
-            labels.append(path.name)
+    seen = set()
+    for item in requested.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        label = value if value == "complete_matrix" or value.startswith("min_taxa_") else filter_label_from_value(value)
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
     if not labels:
-        raise RuntimeError("No filter labels found under {}".format(group_root))
+        raise RuntimeError("No valid filter labels were provided.")
     return labels
 
 
-def discover_alignments(input_dir, threshold_group, filter_label):
-    alignments_dir = Path(input_dir).resolve() / threshold_group / filter_label / "alignments"
+def parse_threshold_groups(requested):
+    if not requested or str(requested).strip().lower() == "all":
+        return None, None
+    dataset_modes = []
+    dataset_seen = set()
+    threshold_groups = []
+    group_seen = set()
+    for item in requested.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        if value in DATASET_CHOICES:
+            if value not in dataset_seen:
+                dataset_seen.add(value)
+                dataset_modes.append(value)
+        else:
+            if value not in group_seen:
+                group_seen.add(value)
+                threshold_groups.append(value)
+    if not dataset_modes and not threshold_groups:
+        raise RuntimeError("No valid threshold groups were provided.")
+    return dataset_modes or None, threshold_groups or None
+
+
+def read_stage11_manifest(input_dir):
+    manifest_path = Path(input_dir).resolve() / "threshold_manifest.tsv"
+    if not manifest_path.is_file():
+        raise RuntimeError("Missing Stage 11 manifest: {}".format(manifest_path))
+    rows = []
+    with open(manifest_path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {
+            "trim_mode",
+            "dataset_label",
+            "threshold_group",
+            "completeness_threshold",
+            "filter_label",
+            "output_dir",
+        }
+        if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
+            raise RuntimeError("Unexpected Stage 11 manifest schema in {}".format(manifest_path))
+        for row in reader:
+            rows.append(
+                {
+                    "trim_mode": row["trim_mode"].strip(),
+                    "dataset_label": row["dataset_label"].strip(),
+                    "threshold_group": row["threshold_group"].strip(),
+                    "completeness_threshold": row["completeness_threshold"].strip(),
+                    "filter_label": row["filter_label"].strip(),
+                    "output_dir": row["output_dir"].strip(),
+                }
+            )
+    if not rows:
+        raise RuntimeError("No rows found in {}".format(manifest_path))
+    return rows
+
+
+def select_stage11_rows(rows, requested_datasets, requested_threshold_groups, requested_filter_labels):
+    selected = []
+    seen = set()
+    for row in rows:
+        if requested_datasets is not None and row["dataset_label"] not in requested_datasets:
+            if requested_threshold_groups is None or row["threshold_group"] not in requested_threshold_groups:
+                continue
+        elif requested_threshold_groups is not None and row["threshold_group"] not in requested_threshold_groups and row["dataset_label"] not in requested_threshold_groups:
+            continue
+        if requested_filter_labels is not None and row["filter_label"] not in requested_filter_labels:
+            continue
+        key = (
+            row["trim_mode"],
+            row["dataset_label"],
+            row["threshold_group"],
+            row["filter_label"],
+            row["output_dir"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(row)
+    if not selected:
+        raise RuntimeError("No Stage 11 result combinations matched the requested filters.")
+    return selected
+
+
+def discover_alignments(combo_output_dir):
+    alignments_dir = Path(combo_output_dir).resolve() / "alignments"
     if not alignments_dir.is_dir():
         raise RuntimeError("Missing alignments directory: {}".format(alignments_dir))
     files = sorted(alignments_dir.glob("*.fasta"))
@@ -185,9 +284,108 @@ def complete_alignment(fasta_path, output_path, all_taxa, missing_character):
     }
 
 
-def write_summary(path, rows):
+def branch_combo_root(output_root, branch, row):
+    return (
+        Path(output_root).resolve()
+        / branch
+        / row["trim_mode"]
+        / row["dataset_label"]
+        / row["filter_label"]
+    )
+
+
+def build_base_row(row, branch, fasta_path, output_path):
+    return {
+        "analysis_branch": branch,
+        "trim_mode": row["trim_mode"],
+        "dataset_label": row["dataset_label"],
+        "threshold_group": row["threshold_group"],
+        "completeness_threshold": row["completeness_threshold"],
+        "filter_label": row["filter_label"],
+        "uce_locus": fasta_path.stem,
+        "input_fasta": str(fasta_path),
+        "output_fasta": str(output_path),
+    }
+
+
+def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_character):
+    combo_root = branch_combo_root(output_root, "supermatrix", row)
+    out_alignments = combo_root / "alignments"
+    summary_rows = []
+    files_with_added = 0
+    for fasta_path in fasta_files:
+        output_path = out_alignments / fasta_path.name
+        result = complete_alignment(fasta_path, output_path, all_taxa, missing_character)
+        if result["added_taxa_count"] > 0:
+            files_with_added += 1
+        summary_row = build_base_row(row, "supermatrix", fasta_path, output_path)
+        summary_row.update(result)
+        summary_rows.append(summary_row)
+    summary_path = combo_root / "branch_summary.tsv"
+    write_branch_summary(summary_path, summary_rows)
+    manifest_row = {
+        "analysis_branch": "supermatrix",
+        "trim_mode": row["trim_mode"],
+        "dataset_label": row["dataset_label"],
+        "threshold_group": row["threshold_group"],
+        "completeness_threshold": row["completeness_threshold"],
+        "filter_label": row["filter_label"],
+        "total_files": len(summary_rows),
+        "files_with_added_taxa": files_with_added,
+        "all_taxa_count": len(all_taxa),
+        "output_dir": str(combo_root),
+        "summary_path": str(summary_path),
+    }
+    return manifest_row, summary_rows
+
+
+def process_gene_tree_branch(row, fasta_files, output_root):
+    combo_root = branch_combo_root(output_root, "gene-tree", row)
+    out_alignments = combo_root / "alignments"
+    out_alignments.mkdir(parents=True, exist_ok=True)
+    summary_rows = []
+    for fasta_path in fasta_files:
+        output_path = out_alignments / fasta_path.name
+        shutil.copyfile(fasta_path, output_path)
+        records = parse_fasta(fasta_path)
+        lengths = {len(seq) for seq in records.values()}
+        alignment_length = next(iter(lengths)) if lengths else 0
+        summary_row = build_base_row(row, "gene-tree", fasta_path, output_path)
+        summary_row.update(
+            {
+                "input_taxa": len(records),
+                "output_taxa": len(records),
+                "alignment_length": alignment_length,
+                "added_taxa_count": 0,
+                "added_taxa_ids": "",
+            }
+        )
+        summary_rows.append(summary_row)
+    summary_path = combo_root / "branch_summary.tsv"
+    write_branch_summary(summary_path, summary_rows)
+    manifest_row = {
+        "analysis_branch": "gene-tree",
+        "trim_mode": row["trim_mode"],
+        "dataset_label": row["dataset_label"],
+        "threshold_group": row["threshold_group"],
+        "completeness_threshold": row["completeness_threshold"],
+        "filter_label": row["filter_label"],
+        "total_files": len(summary_rows),
+        "files_with_added_taxa": 0,
+        "all_taxa_count": "",
+        "output_dir": str(combo_root),
+        "summary_path": str(summary_path),
+    }
+    return manifest_row, summary_rows
+
+
+def write_branch_summary(path, rows):
     fieldnames = [
+        "analysis_branch",
+        "trim_mode",
+        "dataset_label",
         "threshold_group",
+        "completeness_threshold",
         "filter_label",
         "uce_locus",
         "input_fasta",
@@ -207,7 +405,11 @@ def write_summary(path, rows):
 
 def write_manifest(path, rows):
     fieldnames = [
+        "analysis_branch",
+        "trim_mode",
+        "dataset_label",
         "threshold_group",
+        "completeness_threshold",
         "filter_label",
         "total_files",
         "files_with_added_taxa",
@@ -224,63 +426,54 @@ def write_manifest(path, rows):
 
 def main():
     args = get_args()
+    branches = parse_analysis_branches(args.analysis_branches)
+    requested_datasets, requested_threshold_groups = parse_threshold_groups(args.threshold_groups)
+    requested_filter_labels = parse_filter_labels(args.filter_labels)
+    stage11_rows = read_stage11_manifest(args.input_dir)
+    selected_rows = select_stage11_rows(
+        stage11_rows,
+        requested_datasets,
+        requested_threshold_groups,
+        requested_filter_labels,
+    )
     all_taxa = read_all_taxa(args.aggregated_loci)
-    group_labels = threshold_groups(args.input_dir, args.threshold_groups)
     output_root = Path(args.output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    all_rows = []
+
     manifest_rows = []
-    for group in group_labels:
-        label_list = filter_labels(args.input_dir, group, args.filter_labels)
-        for label in label_list:
-            files = discover_alignments(args.input_dir, group, label)
-            combo_root = output_root / group / label
-            out_alignments = combo_root / "alignments"
-            summary_rows = []
-            files_with_added = 0
-            for fasta_path in files:
-                output_path = out_alignments / fasta_path.name
-                result = complete_alignment(
-                    fasta_path, output_path, all_taxa, args.missing_character
-                )
-                if result["added_taxa_count"] > 0:
-                    files_with_added += 1
-                summary_rows.append(
-                    {
-                        "threshold_group": group,
-                        "filter_label": label,
-                        "uce_locus": fasta_path.stem,
-                        "input_fasta": str(fasta_path),
-                        "output_fasta": str(output_path),
-                        "input_taxa": result["input_taxa"],
-                        "output_taxa": result["output_taxa"],
-                        "alignment_length": result["alignment_length"],
-                        "added_taxa_count": result["added_taxa_count"],
-                        "added_taxa_ids": result["added_taxa_ids"],
-                    }
-                )
-            summary_path = combo_root / "missing_data_summary.tsv"
-            write_summary(summary_path, summary_rows)
-            all_rows.extend(summary_rows)
-            manifest_rows.append(
-                {
-                    "threshold_group": group,
-                    "filter_label": label,
-                    "total_files": len(summary_rows),
-                    "files_with_added_taxa": files_with_added,
-                    "all_taxa_count": len(all_taxa),
-                    "output_dir": str(combo_root),
-                    "summary_path": str(summary_path),
-                }
+    all_rows = []
+    for row in selected_rows:
+        fasta_files = discover_alignments(row["output_dir"])
+        for branch in branches:
+            print(
+                "[stage12:{}] {} / {} / {} ({})".format(
+                    branch,
+                    row["trim_mode"],
+                    row["dataset_label"],
+                    row["filter_label"],
+                    len(fasta_files),
+                ),
+                flush=True,
             )
-    write_manifest(output_root / "threshold_manifest.tsv", manifest_rows)
-    write_summary(output_root / "all_thresholds_missing_data_manifest.tsv", all_rows)
+            if branch == "supermatrix":
+                manifest_row, summary_rows = process_supermatrix_branch(
+                    row, fasta_files, output_root, all_taxa, args.missing_character
+                )
+            else:
+                manifest_row, summary_rows = process_gene_tree_branch(
+                    row, fasta_files, output_root
+                )
+            manifest_rows.append(manifest_row)
+            all_rows.extend(summary_rows)
+
+    write_manifest(output_root / "branch_manifest.tsv", manifest_rows)
+    write_branch_summary(output_root / "all_branch_locus_manifest.tsv", all_rows)
     print(
-        "Added missing-data designators for {} threshold groups under {}".format(
-            len(group_labels), output_root
+        "Prepared {} Stage 12 branch combinations under {}".format(
+            len(manifest_rows), output_root
         )
     )
-    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+    print("manifest\t{}".format(output_root / "branch_manifest.tsv"))
 
 
 if __name__ == "__main__":

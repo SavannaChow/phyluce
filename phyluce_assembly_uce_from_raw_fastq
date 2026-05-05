@@ -30,7 +30,7 @@ STAGE_NAMES = {
     9: "09_Aligned_Locus_FASTAs",
     10: "10_Trimmed_Locus_ALIGNMENTS",
     11: "11_Filtered_Locus_ALIGNMENTS",
-    12: "12_Missing_Data_Designators",
+    12: "12_Analysis_Branches",
     13: "13_Concatenated_SUPERMATRICES",
 }
 PROJECT_INFO_NAME = "project.info"
@@ -47,7 +47,7 @@ INTERACTIVE_ACTIONS = {
     "9": ("stage9", "Run 09: Align dataset per-locus FASTA files with MAFFT"),
     "10": ("stage10", "Run 10: Apply trim strategy (edge/internal/both/none)"),
     "11": ("stage11", "Run 11: Filter locus alignments by taxa completeness"),
-    "12": ("stage12", "Run 12: Add missing-data designators"),
+    "12": ("stage12", "Run 12: Dispatch supermatrix and gene-tree analysis branches"),
     "13": ("stage13", "Run 13: Concatenate locus alignments"),
 }
 
@@ -214,7 +214,12 @@ def get_args():
     parser.add_argument(
         "--missing-character",
         default="?",
-        help="Missing-data character used in stage 12.",
+        help="Missing-data character used in the Stage 12 supermatrix branch.",
+    )
+    parser.add_argument(
+        "--analysis-branches",
+        default="both",
+        help="Stage 12 analysis branches to produce: 'supermatrix', 'gene-tree', or 'both'.",
     )
     parser.add_argument(
         "--dry-run",
@@ -230,7 +235,7 @@ def get_args():
         type=int,
         choices=range(1, 14),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci and define datasets, 8=Materialize dataset FASTAs, 9=Align dataset FASTAs, 10=Apply trim strategy, 11=Filter locus alignments by taxa completeness, 12=Add missing-data designators, 13=Concatenate alignments.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci and define datasets, 8=Materialize dataset FASTAs, 9=Align dataset FASTAs, 10=Apply trim strategy, 11=Filter locus alignments by taxa completeness, 12=Dispatch supermatrix/gene-tree branches, 13=Concatenate alignments.",
     )
     parser.add_argument(
         "--end-stage",
@@ -939,9 +944,25 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     missing_character_default = (
         saved_missing_character if saved_missing_character not in (None, "N/A") else args.missing_character
     )
+    saved_analysis_branches = project_info.get("analysis_branches")
+    analysis_branches_default = (
+        saved_analysis_branches if saved_analysis_branches not in (None, "N/A") else args.analysis_branches
+    )
+    if 12 in selected_stages and not cli_flag_present("--analysis-branches"):
+        settings["analysis_branches"] = prompt_choice_with_default(
+            "Stage 12 analysis branches",
+            analysis_branches_default,
+            ["both", "supermatrix", "gene-tree"],
+        )
+    else:
+        settings["analysis_branches"] = (
+            args.analysis_branches
+            if cli_flag_present("--analysis-branches")
+            else analysis_branches_default
+        )
     if 12 in selected_stages and not cli_flag_present("--missing-character"):
         settings["missing_character"] = prompt_text_with_default(
-            "Stage 12 missing-data character", missing_character_default
+            "Stage 12 supermatrix missing-data character", missing_character_default
         )
     else:
         settings["missing_character"] = (
@@ -1605,6 +1626,7 @@ def build_add_missing_data_command(
     output_root,
     threshold_groups,
     filter_labels,
+    analysis_branches,
     missing_character,
 ):
     command = [
@@ -1616,6 +1638,8 @@ def build_add_missing_data_command(
         str(aggregated_loci),
         "--output-dir",
         str(output_root),
+        "--analysis-branches",
+        str(analysis_branches),
         "--missing-character",
         str(missing_character),
     ]
@@ -1785,6 +1809,7 @@ def run_add_missing_data_designators(
     output_root,
     threshold_groups,
     filter_labels,
+    analysis_branches,
     missing_character,
     logger,
     log_root,
@@ -1797,9 +1822,10 @@ def run_add_missing_data_designators(
         output_root,
         threshold_groups,
         filter_labels,
+        analysis_branches,
         missing_character,
     )
-    logger.info("Adding missing-data designators to locus alignments")
+    logger.info("Dispatching Stage 12 supermatrix and gene-tree branches")
     stream_process(
         command,
         logger,
@@ -1886,6 +1912,7 @@ def print_dry_run_plan(
     print("Stage 10 Gblocks path: {}".format(args.gblocks_path))
     print("Stage 10 Gblocks b1/b2/b3/b4: {}/{}/{}/{}".format(args.gblocks_b1, args.gblocks_b2, args.gblocks_b3, args.gblocks_b4))
     print("Stage 11 post-alignment thresholds: {}".format(args.post_align_thresholds))
+    print("Stage 12 analysis branches: {}".format(args.analysis_branches))
     print("Stage 12 missing character: {}".format(args.missing_character))
     if samples:
         print("Detected {} samples: {}".format(len(samples), ", ".join(samples)))
@@ -2190,9 +2217,10 @@ def print_dry_run_plan(
                         executables["add_missing_data_designators"],
                         stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
                         stage_dirs["07_Aggregated_loci"] / "{}.filtered.loci.tsv".format(project_id),
-                        stage_dirs["12_Missing_Data_Designators"],
+                        stage_dirs["12_Analysis_Branches"],
                         args.align_datasets,
                         args.post_align_thresholds,
+                        args.analysis_branches,
                         args.missing_character,
                     )
                 )
@@ -2200,13 +2228,13 @@ def print_dry_run_plan(
         )
         print("  planned outputs:")
         print(
-            "    threshold manifest: {}".format(
-                stage_dirs["12_Missing_Data_Designators"] / "threshold_manifest.tsv"
+            "    branch manifest: {}".format(
+                stage_dirs["12_Analysis_Branches"] / "branch_manifest.tsv"
             )
         )
         print(
-            "    all-threshold manifest: {}".format(
-                stage_dirs["12_Missing_Data_Designators"] / "all_thresholds_missing_data_manifest.tsv"
+            "    all-branch manifest: {}".format(
+                stage_dirs["12_Analysis_Branches"] / "all_branch_locus_manifest.tsv"
             )
         )
         print("")
@@ -2217,7 +2245,7 @@ def print_dry_run_plan(
                 format_command(
                     build_concatenate_alignments_command(
                         executables["concatenate_alignments"],
-                        stage_dirs["12_Missing_Data_Designators"],
+                        stage_dirs["12_Analysis_Branches"],
                         stage_dirs["13_Concatenated_SUPERMATRICES"],
                         args.align_datasets,
                         args.post_align_thresholds,
@@ -2275,9 +2303,14 @@ def main():
         )
     if settings["trim_mode"] == "both" and (args.end_stage >= 12):
         raise RuntimeError(
-            "trim_mode=both is available through Stage 11, but stages 12-13 do not yet "
-            "consume both trim branches. Re-run with --end-stage 11, or use "
-            "--trim-mode edge/internal/none."
+            "trim_mode=both is available through Stage 12, but Stage 13 does not yet "
+            "consume the new branch-aware Stage 12 outputs. Re-run with --end-stage 12, "
+            "or skip Stage 13."
+        )
+    if 13 in selected_stages:
+        raise RuntimeError(
+            "Stage 13 is not yet adapted to the new Stage 12 branch outputs. "
+            "Stop at Stage 12 for now."
         )
     decompressor = shutil.which("pigz") or shutil.which("gzip")
     if raw_dir is not None and 1 in selected_stages and decompressor is None and any(
@@ -2385,6 +2418,7 @@ def main():
                 ("gblocks_b3", settings["gblocks_b3"]),
                 ("gblocks_b4", settings["gblocks_b4"]),
                 ("post_align_thresholds", settings["post_align_thresholds"]),
+                ("analysis_branches", settings["analysis_branches"]),
                 ("missing_character", settings["missing_character"]),
             ]
         ),
@@ -2423,6 +2457,7 @@ def main():
             "gblocks_b3": settings["gblocks_b3"],
             "gblocks_b4": settings["gblocks_b4"],
             "post_align_thresholds": settings["post_align_thresholds"],
+            "analysis_branches": settings["analysis_branches"],
             "missing_character": settings["missing_character"],
             "dry_run": args.dry_run,
             "start_stage": args.start_stage,
@@ -2586,9 +2621,10 @@ def main():
             add_missing_data_script,
             stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
             stage_dirs["07_Aggregated_loci"] / "{}.filtered.loci.tsv".format(project_id),
-            stage_dirs["12_Missing_Data_Designators"],
+            stage_dirs["12_Analysis_Branches"],
             settings["align_datasets"],
             settings["post_align_thresholds"],
+            settings["analysis_branches"],
             settings["missing_character"],
             logger,
             stage_dirs["00_Log"],
@@ -2596,7 +2632,7 @@ def main():
     if args.start_stage <= 13 <= args.end_stage:
         run_concatenate_alignments(
             concatenate_alignments_script,
-            stage_dirs["12_Missing_Data_Designators"],
+            stage_dirs["12_Analysis_Branches"],
             stage_dirs["13_Concatenated_SUPERMATRICES"],
             settings["align_datasets"],
             settings["post_align_thresholds"],
