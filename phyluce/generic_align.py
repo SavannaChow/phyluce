@@ -90,7 +90,7 @@ class GenericAlign(object):
 
     def _read(self, format):
         """read an alignment from the CLI - largely for testing purposes"""
-        self.alignment = AlignIO.read(open(self.input, "rU"), format)
+        self.alignment = AlignIO.read(open(self.input, "r"), format)
 
     def _record_formatter(self, trim, name):
         """return a string formatted as a biopython sequence record"""

@@ -284,6 +284,123 @@ def complete_alignment(fasta_path, output_path, all_taxa, missing_character):
     }
 
 
+def write_phylip_relaxed(path, records):
+    taxa = len(records)
+    length = len(next(iter(records.values()))) if records else 0
+    with open(path, "w") as handle:
+        handle.write("{} {}\n".format(taxa, length))
+        for header, seq in records.items():
+            handle.write("{} {}\n".format(header, seq))
+
+
+def nexus_escape_label(label):
+    safe = str(label).replace("'", "''")
+    return "'{}'".format(safe)
+
+
+def write_nexus(path, records, partitions):
+    taxa = len(records)
+    nchar = len(next(iter(records.values()))) if records else 0
+    with open(path, "w") as handle:
+        handle.write("#NEXUS\n\n")
+        handle.write("BEGIN DATA;\n")
+        handle.write("    DIMENSIONS NTAX={} NCHAR={};\n".format(taxa, nchar))
+        handle.write("    FORMAT DATATYPE=DNA MISSING=? GAP=-;\n")
+        handle.write("    MATRIX\n")
+        for header, seq in records.items():
+            handle.write("    {} {}\n".format(nexus_escape_label(header), seq))
+        handle.write("    ;\n")
+        handle.write("END;\n\n")
+        handle.write("BEGIN SETS;\n")
+        for row in partitions:
+            handle.write(
+                "    CHARSET {} = {}-{};\n".format(
+                    row["locus"], row["start"], row["end"]
+                )
+            )
+        handle.write("END;\n")
+
+
+def concatenate_alignments(alignments_dir, output_root, output_prefix):
+    files = sorted(Path(alignments_dir).glob("*.fasta"))
+    if not files:
+        raise RuntimeError("No alignment FASTA files found under {}".format(alignments_dir))
+    taxa_order = None
+    concatenated = OrderedDict()
+    partitions = []
+    start = 1
+    for fasta_path in files:
+        records = parse_fasta(fasta_path)
+        current_taxa = list(records.keys())
+        if taxa_order is None:
+            taxa_order = current_taxa
+            concatenated = OrderedDict((taxon, "") for taxon in taxa_order)
+        elif current_taxa != taxa_order:
+            raise RuntimeError(
+                "Inconsistent taxon order or taxon set in {}".format(fasta_path)
+            )
+        lengths = {len(seq) for seq in records.values()}
+        if len(lengths) != 1:
+            raise RuntimeError("Inconsistent sequence lengths in {}".format(fasta_path))
+        locus_length = next(iter(lengths)) if lengths else 0
+        end = start + locus_length - 1
+        partitions.append(
+            {
+                "locus": fasta_path.stem,
+                "start": start,
+                "end": end,
+                "length": locus_length,
+            }
+        )
+        for taxon in taxa_order:
+            concatenated[taxon] += records[taxon]
+        start = end + 1
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    raxml_root = output_root / "raxml_iqtree"
+    mrbayes_root = output_root / "mrbayes"
+    raxml_root.mkdir(parents=True, exist_ok=True)
+    mrbayes_root.mkdir(parents=True, exist_ok=True)
+
+    fasta_out = raxml_root / "{}.fasta".format(output_prefix)
+    phylip_out = raxml_root / "{}.phylip".format(output_prefix)
+    charset_tsv_out = raxml_root / "{}.charsets.tsv".format(output_prefix)
+    charset_plain_out = raxml_root / "{}.charsets".format(output_prefix)
+    partition_plain_out = raxml_root / "{}.partitions".format(output_prefix)
+    nexus_out = mrbayes_root / "{}.nexus".format(output_prefix)
+
+    write_fasta(fasta_out, concatenated)
+    write_phylip_relaxed(phylip_out, concatenated)
+    write_nexus(nexus_out, concatenated, partitions)
+    with open(charset_tsv_out, "w", newline="") as handle:
+        fieldnames = ["locus", "start", "end", "length"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
+        writer.writeheader()
+        for row in partitions:
+            writer.writerow(row)
+    with open(charset_plain_out, "w") as handle:
+        for row in partitions:
+            handle.write("charset {} = {}-{};\n".format(row["locus"], row["start"], row["end"]))
+    with open(partition_plain_out, "w") as handle:
+        for row in partitions:
+            handle.write("DNA, {} = {}-{}\n".format(row["locus"], row["start"], row["end"]))
+
+    return {
+        "loci_concatenated": len(files),
+        "taxa_count": len(taxa_order) if taxa_order else 0,
+        "supermatrix_length": len(next(iter(concatenated.values()))) if concatenated else 0,
+        "supermatrix_fasta": str(fasta_out),
+        "supermatrix_phylip": str(phylip_out),
+        "supermatrix_nexus": str(nexus_out),
+        "charset_tsv": str(charset_tsv_out),
+        "charset_file": str(charset_plain_out),
+        "partition_file": str(partition_plain_out),
+        "analysis_output_dir": str(output_root),
+        "raxml_iqtree_dir": str(raxml_root),
+        "mrbayes_dir": str(mrbayes_root),
+    }
+
+
 def branch_combo_root(output_root, branch, row):
     return (
         Path(output_root).resolve()
@@ -321,6 +438,16 @@ def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_
         summary_row = build_base_row(row, "supermatrix", fasta_path, output_path)
         summary_row.update(result)
         summary_rows.append(summary_row)
+    concat_prefix = "{}-{}-{}".format(
+        row["trim_mode"],
+        row["dataset_label"],
+        row["filter_label"],
+    )
+    concat_result = concatenate_alignments(
+        out_alignments,
+        combo_root / "analysis_ready",
+        concat_prefix,
+    )
     summary_path = combo_root / "branch_summary.tsv"
     write_branch_summary(summary_path, summary_rows)
     manifest_row = {
@@ -335,6 +462,18 @@ def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_
         "all_taxa_count": len(all_taxa),
         "output_dir": str(combo_root),
         "summary_path": str(summary_path),
+        "loci_concatenated": concat_result["loci_concatenated"],
+        "taxa_count": concat_result["taxa_count"],
+        "supermatrix_length": concat_result["supermatrix_length"],
+        "supermatrix_fasta": concat_result["supermatrix_fasta"],
+        "supermatrix_phylip": concat_result["supermatrix_phylip"],
+        "supermatrix_nexus": concat_result["supermatrix_nexus"],
+        "charset_tsv": concat_result["charset_tsv"],
+        "charset_file": concat_result["charset_file"],
+        "partition_file": concat_result["partition_file"],
+        "analysis_output_dir": concat_result["analysis_output_dir"],
+        "raxml_iqtree_dir": concat_result["raxml_iqtree_dir"],
+        "mrbayes_dir": concat_result["mrbayes_dir"],
     }
     return manifest_row, summary_rows
 
@@ -375,6 +514,18 @@ def process_gene_tree_branch(row, fasta_files, output_root):
         "all_taxa_count": "",
         "output_dir": str(combo_root),
         "summary_path": str(summary_path),
+        "loci_concatenated": "",
+        "taxa_count": "",
+        "supermatrix_length": "",
+        "supermatrix_fasta": "",
+        "supermatrix_phylip": "",
+        "supermatrix_nexus": "",
+        "charset_tsv": "",
+        "charset_file": "",
+        "partition_file": "",
+        "analysis_output_dir": "",
+        "raxml_iqtree_dir": "",
+        "mrbayes_dir": "",
     }
     return manifest_row, summary_rows
 
@@ -416,6 +567,18 @@ def write_manifest(path, rows):
         "all_taxa_count",
         "output_dir",
         "summary_path",
+        "loci_concatenated",
+        "taxa_count",
+        "supermatrix_length",
+        "supermatrix_fasta",
+        "supermatrix_phylip",
+        "supermatrix_nexus",
+        "charset_tsv",
+        "charset_file",
+        "partition_file",
+        "analysis_output_dir",
+        "raxml_iqtree_dir",
+        "mrbayes_dir",
     ]
     with open(path, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
