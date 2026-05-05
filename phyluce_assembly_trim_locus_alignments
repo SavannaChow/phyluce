@@ -5,6 +5,7 @@ import csv
 import os
 import shutil
 import subprocess
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from Bio import AlignIO
@@ -46,6 +47,12 @@ def get_args():
         choices=["edge", "internal", "both", "none"],
         default="edge",
         help="Trim strategy to apply.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Maximum number of parallel trimming jobs per trim mode.",
     )
     parser.add_argument("--window", type=int, default=20)
     parser.add_argument("--proportion", type=float, default=0.65)
@@ -251,6 +258,28 @@ def trim_one_alignment(path, output_path, trim_mode, args):
     raise RuntimeError("Unsupported trim mode: {}".format(trim_mode))
 
 
+def build_job_config(args):
+    return {
+        "window": args.window,
+        "proportion": args.proportion,
+        "threshold": args.threshold,
+        "max_divergence": args.max_divergence,
+        "min_length": args.min_length,
+        "gblocks_path": args.gblocks_path,
+        "gblocks_b1": args.gblocks_b1,
+        "gblocks_b2": args.gblocks_b2,
+        "gblocks_b3": args.gblocks_b3,
+        "gblocks_b4": args.gblocks_b4,
+    }
+
+
+def trim_one_alignment_worker(task):
+    fasta_path, output_path, trim_mode, config = task
+    args = argparse.Namespace(**config)
+    result = trim_one_alignment(Path(fasta_path), Path(output_path), trim_mode, args)
+    return str(fasta_path), str(output_path), result
+
+
 def mode_output_dir(output_root, trim_mode, dataset_label, compatibility_mode):
     if compatibility_mode:
         return Path(output_root).resolve() / dataset_label
@@ -262,6 +291,7 @@ def trim_dataset(input_dir, output_root, dataset_label, trim_mode, args, compati
     dataset_output = mode_output_dir(output_root, trim_mode, dataset_label, compatibility_mode)
     trimmed_dir = dataset_output / "trimmed_alignments"
     summary_rows = []
+    pending = []
     for fasta_path in fasta_files:
         output_path = trimmed_dir / fasta_path.name
         if output_path.exists():
@@ -283,22 +313,80 @@ def trim_dataset(input_dir, output_root, dataset_label, trim_mode, args, compati
                 }
             )
             continue
-        result = trim_one_alignment(fasta_path, output_path, trim_mode, args)
-        summary_rows.append(
-            {
-                "trim_mode": trim_mode,
-                "dataset_label": dataset_label,
-                "uce_locus": fasta_path.stem,
-                "input_fasta": str(fasta_path),
-                "output_fasta": str(output_path) if result["status"] != "dropped" else "",
-                "input_taxa": result["input_taxa"],
-                "input_length": result["input_length"],
-                "output_taxa": result["output_taxa"],
-                "output_length": result["output_length"],
-                "status": result["status"],
-                "reason": result["reason"],
-            }
+        pending.append((fasta_path, output_path))
+
+    if pending:
+        print(
+            "[stage10:{}:{}] {} loci queued with {} parallel job(s)".format(
+                trim_mode, dataset_label, len(pending), max(1, args.jobs)
+            ),
+            flush=True,
         )
+    if args.jobs <= 1 or len(pending) <= 1:
+        completed = 0
+        progress_interval = max(1, min(25, len(pending) // 10 if pending else 1))
+        for fasta_path, output_path in pending:
+            result = trim_one_alignment(fasta_path, output_path, trim_mode, args)
+            summary_rows.append(
+                {
+                    "trim_mode": trim_mode,
+                    "dataset_label": dataset_label,
+                    "uce_locus": fasta_path.stem,
+                    "input_fasta": str(fasta_path),
+                    "output_fasta": str(output_path) if result["status"] != "dropped" else "",
+                    "input_taxa": result["input_taxa"],
+                    "input_length": result["input_length"],
+                    "output_taxa": result["output_taxa"],
+                    "output_length": result["output_length"],
+                    "status": result["status"],
+                    "reason": result["reason"],
+                }
+            )
+            completed += 1
+            if completed == len(pending) or completed % progress_interval == 0:
+                print(
+                    "[stage10:{}:{}] progress {}/{}".format(
+                        trim_mode, dataset_label, completed, len(pending)
+                    ),
+                    flush=True,
+                )
+    else:
+        job_config = build_job_config(args)
+        tasks = [
+            (str(fasta_path), str(output_path), trim_mode, job_config)
+            for fasta_path, output_path in pending
+        ]
+        completed = 0
+        progress_interval = max(1, min(25, len(tasks) // 10 if tasks else 1))
+        with ProcessPoolExecutor(max_workers=max(1, args.jobs)) as executor:
+            futures = {executor.submit(trim_one_alignment_worker, task): task for task in tasks}
+            for future in as_completed(futures):
+                fasta_path_str, output_path_str, result = future.result()
+                fasta_path = Path(fasta_path_str)
+                output_path = Path(output_path_str)
+                summary_rows.append(
+                    {
+                        "trim_mode": trim_mode,
+                        "dataset_label": dataset_label,
+                        "uce_locus": fasta_path.stem,
+                        "input_fasta": str(fasta_path),
+                        "output_fasta": str(output_path) if result["status"] != "dropped" else "",
+                        "input_taxa": result["input_taxa"],
+                        "input_length": result["input_length"],
+                        "output_taxa": result["output_taxa"],
+                        "output_length": result["output_length"],
+                        "status": result["status"],
+                        "reason": result["reason"],
+                    }
+                )
+                completed += 1
+                if completed == len(tasks) or completed % progress_interval == 0:
+                    print(
+                        "[stage10:{}:{}] progress {}/{}".format(
+                            trim_mode, dataset_label, completed, len(tasks)
+                        ),
+                        flush=True,
+                    )
     summary_rows.sort(key=lambda row: row["uce_locus"])
     return dataset_output, summary_rows
 
