@@ -289,6 +289,7 @@ def mode_output_dir(output_root, trim_mode, dataset_label, compatibility_mode):
 def trim_dataset(input_dir, output_root, dataset_label, trim_mode, args, compatibility_mode):
     fasta_files = discover_alignment_fastas(input_dir, dataset_label)
     dataset_output = mode_output_dir(output_root, trim_mode, dataset_label, compatibility_mode)
+    dataset_output.mkdir(parents=True, exist_ok=True)
     trimmed_dir = dataset_output / "trimmed_alignments"
     summary_rows = []
     pending = []
@@ -392,6 +393,7 @@ def trim_dataset(input_dir, output_root, dataset_label, trim_mode, args, compati
 
 
 def write_summary(path, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "trim_mode",
         "dataset_label",
@@ -413,6 +415,7 @@ def write_summary(path, rows):
 
 
 def write_manifest(path, rows):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "trim_mode",
         "dataset_label",
