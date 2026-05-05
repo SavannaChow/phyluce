@@ -159,12 +159,12 @@ def get_args():
         ),
     )
     parser.add_argument(
-        "--align-thresholds",
+        "--align-datasets",
         default=None,
         help=(
-            "Comma-separated threshold labels or values for stage 9 alignment, "
-            "e.g. 'complete_matrix,coverage_090' or '1.0,0.9'. Defaults to all "
-            "thresholds already present under stage 08."
+            "Comma-separated dataset labels for stage 9 alignment. Accepts "
+            "'complete', 'incomplete', 'complete_matrix', or 'incomplete_matrix'. "
+            "Defaults to all datasets already present under stage 08."
         ),
     )
     parser.add_argument(
@@ -779,22 +779,22 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
             else dataset_modes_default
         )
 
-    saved_align_thresholds = project_info.get("align_thresholds")
-    align_thresholds_default = (
-        saved_align_thresholds
-        if saved_align_thresholds not in (None, "N/A")
-        else (args.align_thresholds if args.align_thresholds is not None else "all")
+    saved_align_datasets = project_info.get("align_datasets")
+    align_datasets_default = (
+        saved_align_datasets
+        if saved_align_datasets not in (None, "N/A")
+        else (args.align_datasets if args.align_datasets is not None else "all")
     )
-    if 9 in selected_stages and not cli_flag_present("--align-thresholds"):
-        settings["align_thresholds"] = prompt_text_with_default(
-            "Stage 9 thresholds (all or comma-separated values/labels)",
-            align_thresholds_default,
+    if 9 in selected_stages and not cli_flag_present("--align-datasets"):
+        settings["align_datasets"] = prompt_text_with_default(
+            "Stage 9 datasets (all or comma-separated labels)",
+            align_datasets_default,
         )
     else:
-        settings["align_thresholds"] = (
-            args.align_thresholds
-            if cli_flag_present("--align-thresholds")
-            else align_thresholds_default
+        settings["align_datasets"] = (
+            args.align_datasets
+            if cli_flag_present("--align-datasets")
+            else align_datasets_default
         )
 
     saved_align_ambiguous = project_info.get("align_ambiguous")
@@ -1439,7 +1439,7 @@ def build_align_locus_fastas_command(
     align_script,
     input_root,
     output_root,
-    thresholds,
+    dataset_modes,
     jobs,
     align_ambiguous,
     align_matrix_mode,
@@ -1455,8 +1455,8 @@ def build_align_locus_fastas_command(
         "--jobs",
         str(jobs),
     ]
-    if thresholds and str(thresholds).strip().lower() != "all":
-        command.extend(["--thresholds", str(thresholds)])
+    if dataset_modes and str(dataset_modes).strip().lower() != "all":
+        command.extend(["--dataset-modes", str(dataset_modes)])
     if align_ambiguous:
         command.append("--ambiguous")
     if align_matrix_mode:
@@ -1606,7 +1606,7 @@ def run_align_locus_fastas(
     align_script,
     input_root,
     output_root,
-    thresholds,
+    dataset_modes,
     jobs,
     align_ambiguous,
     align_matrix_mode,
@@ -1619,7 +1619,7 @@ def run_align_locus_fastas(
         align_script,
         input_root,
         output_root,
-        thresholds,
+        dataset_modes,
         jobs,
         align_ambiguous,
         align_matrix_mode,
@@ -1788,7 +1788,7 @@ def print_dry_run_plan(
     print("Extract mode: {}".format(args.extract_mode))
     print("Flank: {}".format(args.flank))
     print("Stage 8 dataset modes: {}".format(args.dataset_modes))
-    print("Stage 9 align thresholds: {}".format(args.align_thresholds))
+    print("Stage 9 align datasets: {}".format(args.align_datasets))
     print("Stage 9 ambiguous bases: {}".format("keep" if args.align_ambiguous else "drop"))
     print("Stage 9 matrix mode: {}".format(args.align_matrix_mode))
     print("Stage 9 MAFFT path: {}".format(args.mafft_path))
@@ -2007,7 +2007,7 @@ def print_dry_run_plan(
                         executables["align_locus_fastas"],
                         stage_dirs["08_Export_Locus_FASTAs"],
                         stage_dirs["09_Aligned_Locus_FASTAs"],
-                        args.align_thresholds,
+                        args.align_datasets,
                         args.threads,
                         args.align_ambiguous,
                         args.align_matrix_mode,
@@ -2018,13 +2018,13 @@ def print_dry_run_plan(
         )
         print("  planned outputs:")
         print(
-            "    threshold manifest: {}".format(
-                stage_dirs["09_Aligned_Locus_FASTAs"] / "threshold_manifest.tsv"
+            "    dataset manifest: {}".format(
+                stage_dirs["09_Aligned_Locus_FASTAs"] / "dataset_manifest.tsv"
             )
         )
         print(
-            "    all-threshold manifest: {}".format(
-                stage_dirs["09_Aligned_Locus_FASTAs"] / "all_thresholds_alignment_manifest.tsv"
+            "    all-datasets manifest: {}".format(
+                stage_dirs["09_Aligned_Locus_FASTAs"] / "all_datasets_alignment_manifest.tsv"
             )
         )
         print("")
@@ -2037,7 +2037,7 @@ def print_dry_run_plan(
                         executables["trim_locus_alignments"],
                         stage_dirs["09_Aligned_Locus_FASTAs"],
                         stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
-                        args.align_thresholds,
+                        args.align_datasets,
                         args.trim_window,
                         args.trim_proportion,
                         args.trim_threshold,
@@ -2069,7 +2069,7 @@ def print_dry_run_plan(
                         stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
                         stage_dirs["09_Aligned_Locus_FASTAs"],
                         stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
-                        args.align_thresholds,
+                        args.align_datasets,
                         args.post_align_thresholds,
                     )
                 )
@@ -2097,7 +2097,7 @@ def print_dry_run_plan(
                         stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
                         stage_dirs["07_Aggregated_loci"] / "{}.filtered.loci.tsv".format(project_id),
                         stage_dirs["12_Missing_Data_Designators"],
-                        args.align_thresholds,
+                        args.align_datasets,
                         args.post_align_thresholds,
                         args.missing_character,
                     )
@@ -2125,7 +2125,7 @@ def print_dry_run_plan(
                         executables["concatenate_alignments"],
                         stage_dirs["12_Missing_Data_Designators"],
                         stage_dirs["13_Concatenated_SUPERMATRICES"],
-                        args.align_thresholds,
+                        args.align_datasets,
                         args.post_align_thresholds,
                     )
                 )
@@ -2261,7 +2261,7 @@ def main():
                 ("extract_mode", settings["extract_mode"]),
                 ("flank", settings["flank"]),
                 ("dataset_modes", settings["dataset_modes"]),
-                ("align_thresholds", settings["align_thresholds"]),
+                ("align_datasets", settings["align_datasets"]),
                 ("align_ambiguous", settings["align_ambiguous"]),
                 ("align_matrix_mode", settings["align_matrix_mode"]),
                 ("mafft_path", mafft_path or settings["mafft_path"]),
@@ -2293,7 +2293,7 @@ def main():
             "extract_mode": settings["extract_mode"],
             "flank": settings["flank"],
             "dataset_modes": settings["dataset_modes"],
-            "align_thresholds": settings["align_thresholds"],
+            "align_datasets": settings["align_datasets"],
             "align_ambiguous": settings["align_ambiguous"],
             "align_matrix_mode": settings["align_matrix_mode"],
             "mafft_path": mafft_path or settings["mafft_path"],
@@ -2422,7 +2422,7 @@ def main():
             align_locus_fastas_script,
             stage_dirs["08_Export_Locus_FASTAs"],
             stage_dirs["09_Aligned_Locus_FASTAs"],
-            settings["align_thresholds"],
+            settings["align_datasets"],
             settings["threads"],
             settings["align_ambiguous"],
             settings["align_matrix_mode"],
@@ -2435,7 +2435,7 @@ def main():
             trim_locus_alignments_script,
             stage_dirs["09_Aligned_Locus_FASTAs"],
             stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
-            settings["align_thresholds"],
+            settings["align_datasets"],
             settings["trim_window"],
             settings["trim_proportion"],
             settings["trim_threshold"],
@@ -2450,7 +2450,7 @@ def main():
             stage_dirs["10_Trimmed_Locus_ALIGNMENTS"],
             stage_dirs["09_Aligned_Locus_FASTAs"],
             stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
-            settings["align_thresholds"],
+            settings["align_datasets"],
             settings["post_align_thresholds"],
             logger,
             stage_dirs["00_Log"],
@@ -2461,7 +2461,7 @@ def main():
             stage_dirs["11_Filtered_Locus_ALIGNMENTS"],
             stage_dirs["07_Aggregated_loci"] / "{}.filtered.loci.tsv".format(project_id),
             stage_dirs["12_Missing_Data_Designators"],
-            settings["align_thresholds"],
+            settings["align_datasets"],
             settings["post_align_thresholds"],
             settings["missing_character"],
             logger,
@@ -2472,7 +2472,7 @@ def main():
             concatenate_alignments_script,
             stage_dirs["12_Missing_Data_Designators"],
             stage_dirs["13_Concatenated_SUPERMATRICES"],
-            settings["align_thresholds"],
+            settings["align_datasets"],
             settings["post_align_thresholds"],
             logger,
             stage_dirs["00_Log"],

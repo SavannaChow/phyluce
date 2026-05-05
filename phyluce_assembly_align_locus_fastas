@@ -9,17 +9,25 @@ from collections import OrderedDict
 from pathlib import Path
 
 
+DATASET_CHOICES = {
+    "complete": "complete_matrix",
+    "incomplete": "incomplete_matrix",
+    "complete_matrix": "complete_matrix",
+    "incomplete_matrix": "incomplete_matrix",
+}
+
+
 def get_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Align per-locus FASTA files with MAFFT using phyluce-compatible "
-            "parameters."
+            "Align per-locus FASTA files from stage 08 dataset branches with MAFFT "
+            "using phyluce-compatible parameters."
         )
     )
     parser.add_argument(
         "--input-dir",
         required=True,
-        help="Stage 08 directory containing threshold subdirectories.",
+        help="Stage 08 directory containing dataset subdirectories.",
     )
     parser.add_argument(
         "--output-dir",
@@ -27,12 +35,12 @@ def get_args():
         help="Directory for aligned locus FASTA outputs.",
     )
     parser.add_argument(
-        "--thresholds",
+        "--dataset-modes",
         default=None,
         help=(
-            "Optional comma-separated threshold labels or values to align, e.g. "
-            "'complete_matrix,coverage_090' or '1.0,0.9'. Defaults to all "
-            "thresholds found in --input-dir."
+            "Optional comma-separated dataset labels to align. Accepts "
+            "'complete', 'incomplete', 'complete_matrix', or 'incomplete_matrix'. "
+            "Defaults to all datasets found in --input-dir."
         ),
     )
     parser.add_argument(
@@ -52,7 +60,7 @@ def get_args():
         choices=["auto", "strict", "incomplete"],
         default="auto",
         help=(
-            "Pre-alignment taxon rule. 'strict' requires all expected taxa, "
+            "Pre-alignment taxon rule. 'strict' requires all dataset taxa, "
             "'incomplete' requires at least 3 taxa, and 'auto' uses strict "
             "for complete_matrix and incomplete otherwise."
         ),
@@ -65,31 +73,35 @@ def get_args():
     return parser.parse_args()
 
 
-def threshold_label_from_value(value):
-    threshold = float(value)
-    if threshold <= 0 or threshold > 1:
-        raise RuntimeError("Threshold values must be > 0 and <= 1: {}".format(value))
-    if abs(threshold - 1.0) < 1e-9:
-        return "complete_matrix"
-    return "coverage_{:03d}".format(int(round(threshold * 100)))
+def parse_dataset_modes(text):
+    if not text:
+        return None
+    labels = []
+    seen = set()
+    for item in text.split(","):
+        value = item.strip()
+        if not value:
+            continue
+        if value not in DATASET_CHOICES:
+            raise RuntimeError(
+                "Unsupported dataset mode: {}. Expected one of {}".format(
+                    value, ", ".join(sorted(DATASET_CHOICES))
+                )
+            )
+        label = DATASET_CHOICES[value]
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    if not labels:
+        raise RuntimeError("No valid dataset modes were provided.")
+    return labels
 
 
-def resolve_threshold_labels(input_dir, thresholds_text):
+def resolve_dataset_labels(input_dir, dataset_modes_text):
+    requested = parse_dataset_modes(dataset_modes_text)
+    if requested is not None:
+        return requested
     input_root = Path(input_dir).resolve()
-    if thresholds_text:
-        labels = []
-        for item in thresholds_text.split(","):
-            value = item.strip()
-            if not value:
-                continue
-            if value.startswith("coverage_") or value == "complete_matrix":
-                labels.append(value)
-            else:
-                labels.append(threshold_label_from_value(value))
-        if not labels:
-            raise RuntimeError("No valid thresholds were provided.")
-        return labels
-
     labels = []
     for path in sorted(input_root.iterdir()):
         if not path.is_dir():
@@ -97,12 +109,14 @@ def resolve_threshold_labels(input_dir, thresholds_text):
         if (path / "loci").is_dir():
             labels.append(path.name)
     if not labels:
-        raise RuntimeError("No threshold directories with loci/ found under {}".format(input_root))
+        raise RuntimeError(
+            "No dataset directories with loci/ found under {}".format(input_root)
+        )
     return labels
 
 
-def discover_locus_fastas(input_dir, threshold_label):
-    loci_dir = Path(input_dir).resolve() / threshold_label / "loci"
+def discover_locus_fastas(input_dir, dataset_label):
+    loci_dir = Path(input_dir).resolve() / dataset_label / "loci"
     if not loci_dir.is_dir():
         raise RuntimeError("Missing loci directory: {}".format(loci_dir))
     fasta_files = sorted(loci_dir.glob("*.fasta"))
@@ -139,33 +153,25 @@ def write_fasta(path, records):
             handle.write("{}\n".format(sequence))
 
 
-def read_locus_summary(input_dir, threshold_label):
-    summary_path = Path(input_dir).resolve() / threshold_label / "locus_fasta_summary.tsv"
-    if not summary_path.is_file():
-        raise RuntimeError("Missing locus summary for {}: {}".format(threshold_label, summary_path))
-    rows = []
-    with open(summary_path, newline="") as handle:
-        reader = csv.DictReader(handle, delimiter="\t")
-        for row in reader:
-            rows.append(row)
-    if not rows:
-        raise RuntimeError("No locus rows found in {}".format(summary_path))
-    try:
-        total_samples = max(int(row["total_samples"]) for row in rows)
-    except KeyError as exc:
-        raise RuntimeError("Unexpected stage 08 summary schema in {}".format(summary_path)) from exc
-    return total_samples
+def read_dataset_taxa(input_dir, dataset_label):
+    fasta_files = discover_locus_fastas(input_dir, dataset_label)
+    taxa = set()
+    for fasta_path in fasta_files:
+        taxa.update(parse_fasta(fasta_path).keys())
+    if not taxa:
+        raise RuntimeError("No taxa found across dataset {}".format(dataset_label))
+    return sorted(taxa)
 
 
-def resolve_matrix_mode(matrix_mode, threshold_label):
+def resolve_matrix_mode(matrix_mode, dataset_label):
     if matrix_mode != "auto":
         return matrix_mode
-    if threshold_label == "complete_matrix":
+    if dataset_label == "complete_matrix":
         return "strict"
     return "incomplete"
 
 
-def prefilter_locus(input_fasta, prefiltered_fasta, threshold_label, total_taxa, matrix_mode, allow_ambiguous):
+def prefilter_locus(input_fasta, prefiltered_fasta, dataset_label, total_taxa, matrix_mode, allow_ambiguous):
     records = parse_fasta(input_fasta)
     input_taxa = len(records)
     retained = OrderedDict()
@@ -176,7 +182,7 @@ def prefilter_locus(input_fasta, prefiltered_fasta, threshold_label, total_taxa,
             continue
         retained[header] = sequence
     retained_taxa = len(retained)
-    effective_mode = resolve_matrix_mode(matrix_mode, threshold_label)
+    effective_mode = resolve_matrix_mode(matrix_mode, dataset_label)
     status = "ready"
     reason = ""
     if effective_mode == "strict":
@@ -225,12 +231,12 @@ def run_mafft(input_fasta, output_fasta, mafft_path):
     return process.stderr
 
 
-def align_threshold(input_dir, output_dir, threshold_label, jobs, matrix_mode, allow_ambiguous, mafft_path):
-    fasta_files = discover_locus_fastas(input_dir, threshold_label)
-    total_taxa = read_locus_summary(input_dir, threshold_label)
-    threshold_output = Path(output_dir).resolve() / threshold_label
-    prefiltered_dir = threshold_output / "prefiltered_fastas"
-    alignments_dir = threshold_output / "alignments"
+def align_dataset(input_dir, output_dir, dataset_label, jobs, matrix_mode, allow_ambiguous, mafft_path):
+    fasta_files = discover_locus_fastas(input_dir, dataset_label)
+    total_taxa = len(read_dataset_taxa(input_dir, dataset_label))
+    dataset_output = Path(output_dir).resolve() / dataset_label
+    prefiltered_dir = dataset_output / "prefiltered_fastas"
+    alignments_dir = dataset_output / "alignments"
     alignments_dir.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
@@ -241,13 +247,13 @@ def align_threshold(input_dir, output_dir, threshold_label, jobs, matrix_mode, a
         prefilter_result = prefilter_locus(
             fasta_path,
             prefiltered_path,
-            threshold_label,
+            dataset_label,
             total_taxa,
             matrix_mode,
             allow_ambiguous,
         )
         locus_row = {
-            "threshold_label": threshold_label,
+            "dataset_label": dataset_label,
             "uce_locus": fasta_path.stem,
             "input_fasta": str(fasta_path),
             "prefiltered_fasta": str(prefiltered_path) if prefilter_result["status"] == "ready" else "",
@@ -281,7 +287,7 @@ def align_threshold(input_dir, output_dir, threshold_label, jobs, matrix_mode, a
             for prefiltered_path, output_path, locus_row in pending
         }
         for future in as_completed(futures):
-            _, output_path, locus_row = futures[future]
+            _, _, locus_row = futures[future]
             future.result()
             locus_row["status"] = "aligned"
             locus_row["reason"] = ""
@@ -293,7 +299,7 @@ def align_threshold(input_dir, output_dir, threshold_label, jobs, matrix_mode, a
 
 def write_alignment_summary(path, rows):
     fieldnames = [
-        "threshold_label",
+        "dataset_label",
         "uce_locus",
         "input_fasta",
         "prefiltered_fasta",
@@ -314,9 +320,9 @@ def write_alignment_summary(path, rows):
             writer.writerow(row)
 
 
-def write_threshold_summary(path, rows):
+def write_dataset_summary(path, rows):
     fieldnames = [
-        "threshold_label",
+        "dataset_label",
         "aligned_files",
         "existing_files",
         "dropped_files",
@@ -335,49 +341,44 @@ def write_threshold_summary(path, rows):
 
 def main():
     args = get_args()
-    threshold_labels = resolve_threshold_labels(args.input_dir, args.thresholds)
+    dataset_labels = resolve_dataset_labels(args.input_dir, args.dataset_modes)
     output_root = Path(args.output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
     all_rows = []
-    threshold_rows = []
-    for threshold_label in threshold_labels:
-        summary_rows = align_threshold(
+    dataset_rows = []
+    for dataset_label in dataset_labels:
+        summary_rows = align_dataset(
             args.input_dir,
             args.output_dir,
-            threshold_label,
+            dataset_label,
             args.jobs,
             args.matrix_mode,
             args.ambiguous,
             args.mafft_path,
         )
-        threshold_dir = output_root / threshold_label
-        summary_path = threshold_dir / "alignment_summary.tsv"
+        dataset_dir = output_root / dataset_label
+        summary_path = dataset_dir / "alignment_summary.tsv"
         write_alignment_summary(summary_path, summary_rows)
         all_rows.extend(summary_rows)
-        aligned = sum(1 for row in summary_rows if row["status"] == "aligned")
-        existing = sum(1 for row in summary_rows if row["status"] == "existing")
-        dropped = sum(1 for row in summary_rows if row["status"] == "dropped")
-        threshold_rows.append(
+        dataset_rows.append(
             {
-                "threshold_label": threshold_label,
-                "aligned_files": aligned,
-                "existing_files": existing,
-                "dropped_files": dropped,
+                "dataset_label": dataset_label,
+                "aligned_files": sum(1 for row in summary_rows if row["status"] == "aligned"),
+                "existing_files": sum(1 for row in summary_rows if row["status"] == "existing"),
+                "dropped_files": sum(1 for row in summary_rows if row["status"] == "dropped"),
                 "total_files": len(summary_rows),
-                "matrix_mode": resolve_matrix_mode(args.matrix_mode, threshold_label),
+                "matrix_mode": resolve_matrix_mode(args.matrix_mode, dataset_label),
                 "ambiguous_mode": "keep" if args.ambiguous else "drop",
-                "output_dir": str(threshold_dir),
+                "output_dir": str(dataset_dir),
                 "summary_path": str(summary_path),
             }
         )
 
-    write_alignment_summary(
-        output_root / "all_thresholds_alignment_manifest.tsv", all_rows
-    )
-    write_threshold_summary(output_root / "threshold_manifest.tsv", threshold_rows)
-    print("Aligned locus FASTA files for {} thresholds under {}".format(len(threshold_labels), output_root))
-    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+    write_alignment_summary(output_root / "all_datasets_alignment_manifest.tsv", all_rows)
+    write_dataset_summary(output_root / "dataset_manifest.tsv", dataset_rows)
+    print("Aligned locus FASTA files for {} datasets under {}".format(len(dataset_labels), output_root))
+    print("manifest\t{}".format(output_root / "dataset_manifest.tsv"))
 
 
 if __name__ == "__main__":
