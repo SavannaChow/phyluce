@@ -190,6 +190,21 @@ def get_args():
     parser.add_argument("--trim-max-divergence", type=float, default=0.20, help="Stage 10 row masking max divergence.")
     parser.add_argument("--trim-min-length", type=int, default=100, help="Stage 10 minimum alignment length.")
     parser.add_argument(
+        "--trim-mode",
+        choices=["edge", "internal", "both", "none"],
+        default="edge",
+        help="Stage 10 trim strategy.",
+    )
+    parser.add_argument(
+        "--gblocks-path",
+        default=None,
+        help="Path to the Gblocks executable for Stage 10 internal trimming.",
+    )
+    parser.add_argument("--gblocks-b1", type=float, default=0.5, help="Stage 10 Gblocks b1 proportion.")
+    parser.add_argument("--gblocks-b2", type=float, default=0.85, help="Stage 10 Gblocks b2 proportion.")
+    parser.add_argument("--gblocks-b3", type=int, default=8, help="Stage 10 Gblocks b3 value.")
+    parser.add_argument("--gblocks-b4", type=int, default=10, help="Stage 10 Gblocks b4 value.")
+    parser.add_argument(
         "--post-align-thresholds",
         default="1.0",
         help=(
@@ -865,6 +880,42 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
         "trim_max_divergence", args.trim_max_divergence, "Stage 10 max divergence"
     )
     settings["trim_min_length"] = resolve_trim_value("trim_min_length", args.trim_min_length, "Stage 10 minimum length")
+    saved_trim_mode = project_info.get("trim_mode")
+    trim_mode_default = saved_trim_mode if saved_trim_mode not in (None, "N/A") else args.trim_mode
+    if 10 in selected_stages and not cli_flag_present("--trim-mode"):
+        settings["trim_mode"] = prompt_choice_with_default(
+            "Stage 10 trim mode", trim_mode_default, ["edge", "internal", "both", "none"]
+        )
+    else:
+        settings["trim_mode"] = args.trim_mode if cli_flag_present("--trim-mode") else trim_mode_default
+    saved_gblocks_path = project_info.get("gblocks_path")
+    gblocks_path_default = (
+        saved_gblocks_path
+        if saved_gblocks_path not in (None, "N/A")
+        else (args.gblocks_path if args.gblocks_path else "Gblocks")
+    )
+    if 10 in selected_stages and settings["trim_mode"] in ("internal", "both") and not cli_flag_present("--gblocks-path"):
+        settings["gblocks_path"] = prompt_text_with_default("Stage 10 Gblocks path", gblocks_path_default)
+    else:
+        settings["gblocks_path"] = args.gblocks_path if cli_flag_present("--gblocks-path") else gblocks_path_default
+
+    def resolve_gblocks_value(key, arg_value, prompt_message):
+        saved_value = project_info.get(key)
+        default_value = (
+            type(arg_value)(saved_value)
+            if saved_value not in (None, "N/A")
+            else arg_value
+        )
+        if 10 not in selected_stages or settings["trim_mode"] not in ("internal", "both") or cli_flag_present("--" + key.replace("_", "-")):
+            return arg_value if cli_flag_present("--" + key.replace("_", "-")) else default_value
+        if isinstance(arg_value, int):
+            return prompt_int_with_default(prompt_message, default_value)
+        return prompt_float_with_default(prompt_message, default_value)
+
+    settings["gblocks_b1"] = resolve_gblocks_value("gblocks_b1", args.gblocks_b1, "Stage 10 Gblocks b1")
+    settings["gblocks_b2"] = resolve_gblocks_value("gblocks_b2", args.gblocks_b2, "Stage 10 Gblocks b2")
+    settings["gblocks_b3"] = resolve_gblocks_value("gblocks_b3", args.gblocks_b3, "Stage 10 Gblocks b3")
+    settings["gblocks_b4"] = resolve_gblocks_value("gblocks_b4", args.gblocks_b4, "Stage 10 Gblocks b4")
 
     saved_post_align_thresholds = project_info.get("post_align_thresholds")
     post_align_thresholds_default = (
@@ -1470,12 +1521,18 @@ def build_trim_locus_alignments_command(
     trim_script,
     input_root,
     output_root,
-    thresholds,
+    dataset_modes,
     trim_window,
     trim_proportion,
     trim_threshold,
     trim_max_divergence,
     trim_min_length,
+    trim_mode,
+    gblocks_path,
+    gblocks_b1,
+    gblocks_b2,
+    gblocks_b3,
+    gblocks_b4,
 ):
     command = [
         sys.executable,
@@ -1494,9 +1551,25 @@ def build_trim_locus_alignments_command(
         str(trim_max_divergence),
         "--min-length",
         str(trim_min_length),
+        "--trim-mode",
+        str(trim_mode),
     ]
-    if thresholds and str(thresholds).strip().lower() != "all":
-        command.extend(["--thresholds", str(thresholds)])
+    if dataset_modes and str(dataset_modes).strip().lower() != "all":
+        command.extend(["--dataset-modes", str(dataset_modes)])
+    if gblocks_path:
+        command.extend(["--gblocks-path", str(gblocks_path)])
+    command.extend(
+        [
+            "--gblocks-b1",
+            str(gblocks_b1),
+            "--gblocks-b2",
+            str(gblocks_b2),
+            "--gblocks-b3",
+            str(gblocks_b3),
+            "--gblocks-b4",
+            str(gblocks_b4),
+        ]
+    )
     return command
 
 
@@ -1637,12 +1710,18 @@ def run_trim_locus_alignments(
     trim_script,
     input_root,
     output_root,
-    thresholds,
+    dataset_modes,
     trim_window,
     trim_proportion,
     trim_threshold,
     trim_max_divergence,
     trim_min_length,
+    trim_mode,
+    gblocks_path,
+    gblocks_b1,
+    gblocks_b2,
+    gblocks_b3,
+    gblocks_b4,
     logger,
     log_root,
 ):
@@ -1651,12 +1730,18 @@ def run_trim_locus_alignments(
         trim_script,
         input_root,
         output_root,
-        thresholds,
+        dataset_modes,
         trim_window,
         trim_proportion,
         trim_threshold,
         trim_max_divergence,
         trim_min_length,
+        trim_mode,
+        gblocks_path,
+        gblocks_b1,
+        gblocks_b2,
+        gblocks_b3,
+        gblocks_b4,
     )
     logger.info("Trimming and masking locus alignments")
     stream_process(
@@ -1797,6 +1882,9 @@ def print_dry_run_plan(
     print("Stage 10 trim threshold: {}".format(args.trim_threshold))
     print("Stage 10 trim max divergence: {}".format(args.trim_max_divergence))
     print("Stage 10 trim min length: {}".format(args.trim_min_length))
+    print("Stage 10 trim mode: {}".format(args.trim_mode))
+    print("Stage 10 Gblocks path: {}".format(args.gblocks_path))
+    print("Stage 10 Gblocks b1/b2/b3/b4: {}/{}/{}/{}".format(args.gblocks_b1, args.gblocks_b2, args.gblocks_b3, args.gblocks_b4))
     print("Stage 11 post-alignment thresholds: {}".format(args.post_align_thresholds))
     print("Stage 12 missing character: {}".format(args.missing_character))
     if samples:
@@ -2043,6 +2131,12 @@ def print_dry_run_plan(
                         args.trim_threshold,
                         args.trim_max_divergence,
                         args.trim_min_length,
+                        args.trim_mode,
+                        args.gblocks_path,
+                        args.gblocks_b1,
+                        args.gblocks_b2,
+                        args.gblocks_b3,
+                        args.gblocks_b4,
                     )
                 )
             )
@@ -2055,7 +2149,7 @@ def print_dry_run_plan(
         )
         print(
             "    all-threshold manifest: {}".format(
-                stage_dirs["10_Trimmed_Locus_ALIGNMENTS"] / "all_thresholds_trimming_manifest.tsv"
+                stage_dirs["10_Trimmed_Locus_ALIGNMENTS"] / "all_trimming_manifest.tsv"
             )
         )
         print("")
@@ -2172,6 +2266,19 @@ def main():
             if settings["mafft_path"] and settings["mafft_path"] != "mafft"
             else require_executable(["mafft"])
         )
+    gblocks_path = None
+    if 10 in selected_stages and settings["trim_mode"] in ("internal", "both"):
+        gblocks_path = (
+            str(Path(settings["gblocks_path"]).expanduser())
+            if settings["gblocks_path"] and settings["gblocks_path"] != "Gblocks"
+            else require_executable(["Gblocks", "gblocks"])
+        )
+    if settings["trim_mode"] == "both" and (args.end_stage >= 11):
+        raise RuntimeError(
+            "trim_mode=both is available for Stage 10, but stages 11-13 do not yet "
+            "consume both trim branches. Re-run with --end-stage 10, or use "
+            "--trim-mode edge/internal/none."
+        )
     decompressor = shutil.which("pigz") or shutil.which("gzip")
     if raw_dir is not None and 1 in selected_stages and decompressor is None and any(
         path.name.lower().endswith(GZ_FASTQ_EXTENSIONS)
@@ -2215,6 +2322,7 @@ def main():
         "add_missing_data_designators": add_missing_data_script,
         "concatenate_alignments": concatenate_alignments_script,
         "mafft": mafft_path,
+        "gblocks": gblocks_path,
     }
 
     if args.dry_run:
@@ -2270,6 +2378,12 @@ def main():
                 ("trim_threshold", settings["trim_threshold"]),
                 ("trim_max_divergence", settings["trim_max_divergence"]),
                 ("trim_min_length", settings["trim_min_length"]),
+                ("trim_mode", settings["trim_mode"]),
+                ("gblocks_path", settings["gblocks_path"]),
+                ("gblocks_b1", settings["gblocks_b1"]),
+                ("gblocks_b2", settings["gblocks_b2"]),
+                ("gblocks_b3", settings["gblocks_b3"]),
+                ("gblocks_b4", settings["gblocks_b4"]),
                 ("post_align_thresholds", settings["post_align_thresholds"]),
                 ("missing_character", settings["missing_character"]),
             ]
@@ -2302,6 +2416,12 @@ def main():
             "trim_threshold": settings["trim_threshold"],
             "trim_max_divergence": settings["trim_max_divergence"],
             "trim_min_length": settings["trim_min_length"],
+            "trim_mode": settings["trim_mode"],
+            "gblocks_path": settings["gblocks_path"],
+            "gblocks_b1": settings["gblocks_b1"],
+            "gblocks_b2": settings["gblocks_b2"],
+            "gblocks_b3": settings["gblocks_b3"],
+            "gblocks_b4": settings["gblocks_b4"],
             "post_align_thresholds": settings["post_align_thresholds"],
             "missing_character": settings["missing_character"],
             "dry_run": args.dry_run,
@@ -2441,6 +2561,12 @@ def main():
             settings["trim_threshold"],
             settings["trim_max_divergence"],
             settings["trim_min_length"],
+            settings["trim_mode"],
+            settings["gblocks_path"],
+            settings["gblocks_b1"],
+            settings["gblocks_b2"],
+            settings["gblocks_b3"],
+            settings["gblocks_b4"],
             logger,
             stage_dirs["00_Log"],
         )
