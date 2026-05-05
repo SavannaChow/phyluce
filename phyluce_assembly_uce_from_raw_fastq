@@ -42,10 +42,10 @@ INTERACTIVE_ACTIONS = {
     "4": ("stage4", "Run 04: Prepare UCE hits from PAF"),
     "5": ("stage5", "Run 05: Filter UCE hits and write trace"),
     "6": ("stage6", "Run 06: Extract UCE FASTA from filtered loci"),
-    "7": ("stage7", "Run 07: Aggregate all filtered loci tables"),
-    "8": ("stage8", "Run 08: Export one FASTA per UCE locus"),
-    "9": ("stage9", "Run 09: Align per-locus FASTA files with MAFFT"),
-    "10": ("stage10", "Run 10: Trim and mask locus alignments"),
+    "7": ("stage7", "Run 07: Aggregate loci and define complete/incomplete datasets"),
+    "8": ("stage8", "Run 08: Materialize dataset monolithic and per-locus FASTAs"),
+    "9": ("stage9", "Run 09: Align dataset per-locus FASTA files with MAFFT"),
+    "10": ("stage10", "Run 10: Apply trim strategy (edge/internal/both/none)"),
     "11": ("stage11", "Run 11: Filter locus alignments by taxa completeness"),
     "12": ("stage12", "Run 12: Add missing-data designators"),
     "13": ("stage13", "Run 13: Concatenate locus alignments"),
@@ -231,7 +231,7 @@ def get_args():
         type=int,
         choices=range(1, 14),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci, 8=Export per-locus FASTA, 9=Align per-locus FASTA, 10=Trim locus alignments, 11=Filter locus alignments by taxa completeness, 12=Add missing-data designators, 13=Concatenate alignments.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci and define datasets, 8=Materialize dataset FASTAs, 9=Align dataset FASTAs, 10=Apply trim strategy, 11=Filter locus alignments by taxa completeness, 12=Add missing-data designators, 13=Concatenate alignments.",
     )
     parser.add_argument(
         "--end-stage",
