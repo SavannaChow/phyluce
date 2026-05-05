@@ -141,7 +141,7 @@ def trim_one_alignment_edge(path, output_path, args):
         }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as handle:
-        handle.write(aln.trimmed.format("fasta"))
+        AlignIO.write(aln.trimmed, handle, "fasta")
     output_taxa = len(aln.trimmed)
     output_length = aln.trimmed.get_alignment_length()
     return {
