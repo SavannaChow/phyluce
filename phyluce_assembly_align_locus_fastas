@@ -9,12 +9,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 
-DATASET_CHOICES = {
-    "complete": "complete_matrix",
-    "incomplete": "incomplete_matrix",
-    "complete_matrix": "complete_matrix",
-    "incomplete_matrix": "incomplete_matrix",
-}
+DATASET_CHOICES = ("complete", "incomplete")
 
 
 def get_args():
@@ -39,7 +34,7 @@ def get_args():
         default=None,
         help=(
             "Optional comma-separated dataset labels to align. Accepts "
-            "'complete', 'incomplete', 'complete_matrix', or 'incomplete_matrix'. "
+            "'complete' and/or 'incomplete'. "
             "Defaults to all datasets found in --input-dir."
         ),
     )
@@ -62,7 +57,7 @@ def get_args():
         help=(
             "Pre-alignment taxon rule. 'strict' requires all dataset taxa, "
             "'incomplete' requires at least 3 taxa, and 'auto' uses strict "
-            "for complete_matrix and incomplete otherwise."
+            "for complete and incomplete otherwise."
         ),
     )
     parser.add_argument(
@@ -85,13 +80,12 @@ def parse_dataset_modes(text):
         if value not in DATASET_CHOICES:
             raise RuntimeError(
                 "Unsupported dataset mode: {}. Expected one of {}".format(
-                    value, ", ".join(sorted(DATASET_CHOICES))
+                    value, ", ".join(DATASET_CHOICES)
                 )
             )
-        label = DATASET_CHOICES[value]
-        if label not in seen:
-            seen.add(label)
-            labels.append(label)
+        if value not in seen:
+            seen.add(value)
+            labels.append(value)
     if not labels:
         raise RuntimeError("No valid dataset modes were provided.")
     return labels
@@ -166,7 +160,7 @@ def read_dataset_taxa(input_dir, dataset_label):
 def resolve_matrix_mode(matrix_mode, dataset_label):
     if matrix_mode != "auto":
         return matrix_mode
-    if dataset_label == "complete_matrix":
+    if dataset_label == "complete":
         return "strict"
     return "incomplete"
 

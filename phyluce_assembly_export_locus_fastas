@@ -6,12 +6,7 @@ from collections import OrderedDict, defaultdict
 from pathlib import Path
 
 
-DATASET_CHOICES = {
-    "complete": "complete_matrix",
-    "incomplete": "incomplete_matrix",
-    "complete_matrix": "complete_matrix",
-    "incomplete_matrix": "incomplete_matrix",
-}
+DATASET_CHOICES = ("complete", "incomplete")
 
 
 def get_args():
@@ -46,7 +41,7 @@ def get_args():
         default="complete,incomplete",
         help=(
             "Comma-separated dataset modes to materialize. Accepts "
-            "'complete', 'incomplete', 'complete_matrix', or 'incomplete_matrix'."
+            "'complete' and/or 'incomplete'."
         ),
     )
     parser.add_argument(
@@ -67,13 +62,12 @@ def parse_dataset_modes(text):
         if value not in DATASET_CHOICES:
             raise RuntimeError(
                 "Unsupported dataset mode: {}. Expected one of {}".format(
-                    value, ", ".join(sorted(DATASET_CHOICES))
+                    value, ", ".join(DATASET_CHOICES)
                 )
             )
-        label = DATASET_CHOICES[value]
-        if label not in seen:
-            seen.add(label)
-            labels.append(label)
+        if value not in seen:
+            seen.add(value)
+            labels.append(value)
     if not labels:
         raise RuntimeError("No valid dataset modes were provided.")
     return labels
@@ -259,7 +253,7 @@ def main():
     all_rows = []
     for dataset_label in dataset_modes:
         manifest_path = aggregate_root / "{}.{}.manifest.tsv".format(
-            args.prefix, "complete" if dataset_label == "complete_matrix" else "incomplete"
+            args.prefix, dataset_label
         )
         rows = read_dataset_manifest(manifest_path)
         manifest_row, summary_rows = materialize_dataset(

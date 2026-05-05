@@ -154,8 +154,7 @@ def get_args():
         default="complete,incomplete",
         help=(
             "Comma-separated dataset modes for stage 8 export. "
-            "Accepts 'complete', 'incomplete', 'complete_matrix', or "
-            "'incomplete_matrix'."
+            "Accepts 'complete' and/or 'incomplete'."
         ),
     )
     parser.add_argument(
@@ -163,7 +162,7 @@ def get_args():
         default=None,
         help=(
             "Comma-separated dataset labels for stage 9 alignment. Accepts "
-            "'complete', 'incomplete', 'complete_matrix', or 'incomplete_matrix'. "
+            "'complete' and/or 'incomplete'. "
             "Defaults to all datasets already present under stage 08."
         ),
     )
@@ -177,7 +176,7 @@ def get_args():
         "--align-matrix-mode",
         choices=["auto", "strict", "incomplete"],
         default="auto",
-        help="Stage 9 taxon rule. 'auto' uses strict for complete_matrix and incomplete otherwise.",
+        help="Stage 9 taxon rule. 'auto' uses strict for complete and incomplete otherwise.",
     )
     parser.add_argument(
         "--mafft-path",
@@ -785,7 +784,8 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     )
     if 8 in selected_stages and not cli_flag_present("--dataset-modes"):
         settings["dataset_modes"] = prompt_text_with_default(
-            "Stage 8 dataset modes", dataset_modes_default
+            "Stage 8 dataset modes (complete, incomplete, or complete,incomplete)",
+            dataset_modes_default,
         )
     else:
         settings["dataset_modes"] = (
@@ -802,7 +802,7 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     )
     if 9 in selected_stages and not cli_flag_present("--align-datasets"):
         settings["align_datasets"] = prompt_text_with_default(
-            "Stage 9 datasets (all or comma-separated labels)",
+            "Stage 9 datasets (all, complete, incomplete, or complete,incomplete)",
             align_datasets_default,
         )
     else:
