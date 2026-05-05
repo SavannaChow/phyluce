@@ -20,6 +20,19 @@ LOCI_FIELDS = [
     "filtered_loci_path",
 ]
 
+DATASET_MANIFEST_FIELDS = [
+    "dataset_mode",
+    "sample_id",
+    "uce_locus",
+    "target_name",
+    "target_start",
+    "target_end",
+    "strand",
+    "probe_hit_count",
+    "query_names",
+    "filtered_loci_path",
+]
+
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -253,6 +266,67 @@ def write_sample_summary(path, samples, loci, by_pair):
             )
 
 
+def rows_for_loci(rows, allowed_loci):
+    allowed = set(allowed_loci)
+    return [row for row in rows if row["uce_locus"] in allowed]
+
+
+def complete_loci(loci, samples, by_pair):
+    return [locus for locus in loci if all((locus, sample) in by_pair for sample in samples)]
+
+
+def incomplete_missing_by_sample(loci, samples, by_pair):
+    missing = {}
+    for sample in samples:
+        sample_missing = [locus for locus in loci if (locus, sample) not in by_pair]
+        if sample_missing:
+            missing[sample] = sample_missing
+    return missing
+
+
+def write_match_count_config(path, samples, loci):
+    with open(path, "w") as handle:
+        handle.write("[Organisms]\n")
+        for sample in samples:
+            handle.write("{}\n".format(sample))
+        handle.write("[Loci]\n")
+        for locus in loci:
+            handle.write("{}\n".format(locus))
+
+
+def write_incomplete_manifest(path, missing_by_sample):
+    with open(path, "w") as handle:
+        for sample in sorted(missing_by_sample):
+            handle.write("[{}]\n".format(sample))
+            for locus in missing_by_sample[sample]:
+                handle.write("{}\n".format(locus))
+
+
+def write_dataset_manifest(path, dataset_mode, rows):
+    with open(path, "w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=DATASET_MANIFEST_FIELDS, delimiter="\t"
+        )
+        writer.writeheader()
+        for row in sorted(rows, key=lambda r: (r["uce_locus"], r["sample_id"])):
+            output_row = {"dataset_mode": dataset_mode}
+            output_row.update({field: row[field] for field in LOCI_FIELDS})
+            writer.writerow(output_row)
+
+
+def write_dataset_summary(path, samples, complete_locus_list, incomplete_locus_list, missing_by_sample):
+    with open(path, "w") as handle:
+        handle.write("samples\t{}\n".format(len(samples)))
+        handle.write("complete_loci\t{}\n".format(len(complete_locus_list)))
+        handle.write("incomplete_loci\t{}\n".format(len(incomplete_locus_list)))
+        handle.write(
+            "samples_with_missing_loci\t{}\n".format(len(missing_by_sample))
+        )
+        handle.write("\n[missing_loci_per_sample]\n")
+        for sample in sorted(missing_by_sample):
+            handle.write("{}\t{}\n".format(sample, len(missing_by_sample[sample])))
+
+
 def main():
     args = get_args()
     input_dir = Path(args.input_dir).resolve()
@@ -260,6 +334,11 @@ def main():
     paths = find_loci_files(input_dir)
     rows = read_loci_files(paths)
     loci, samples, by_pair = build_presence(rows)
+    complete_locus_list = complete_loci(loci, samples, by_pair)
+    incomplete_locus_list = list(loci)
+    complete_rows = rows_for_loci(rows, complete_locus_list)
+    incomplete_rows = rows_for_loci(rows, incomplete_locus_list)
+    missing_by_sample = incomplete_missing_by_sample(loci, samples, by_pair)
 
     outputs = {
         "sqlite": output_dir / "{}.uce.sqlite".format(args.prefix),
@@ -268,6 +347,12 @@ def main():
         "target": output_dir / "{}.target_matrix.tsv".format(args.prefix),
         "locus_summary": output_dir / "{}.locus_summary.tsv".format(args.prefix),
         "sample_summary": output_dir / "{}.sample_summary.tsv".format(args.prefix),
+        "complete_config": output_dir / "{}.complete.conf".format(args.prefix),
+        "incomplete_config": output_dir / "{}.incomplete.conf".format(args.prefix),
+        "incomplete_missing": output_dir / "{}.incomplete.missing.conf".format(args.prefix),
+        "complete_manifest": output_dir / "{}.complete.manifest.tsv".format(args.prefix),
+        "incomplete_manifest": output_dir / "{}.incomplete.manifest.tsv".format(args.prefix),
+        "dataset_summary": output_dir / "{}.dataset_summary.txt".format(args.prefix),
     }
 
     write_sqlite(outputs["sqlite"], rows)
@@ -276,6 +361,18 @@ def main():
     write_target_matrix(outputs["target"], loci, samples, by_pair)
     write_locus_summary(outputs["locus_summary"], loci, samples, by_pair)
     write_sample_summary(outputs["sample_summary"], samples, loci, by_pair)
+    write_match_count_config(outputs["complete_config"], samples, complete_locus_list)
+    write_match_count_config(outputs["incomplete_config"], samples, incomplete_locus_list)
+    write_incomplete_manifest(outputs["incomplete_missing"], missing_by_sample)
+    write_dataset_manifest(outputs["complete_manifest"], "complete", complete_rows)
+    write_dataset_manifest(outputs["incomplete_manifest"], "incomplete", incomplete_rows)
+    write_dataset_summary(
+        outputs["dataset_summary"],
+        samples,
+        complete_locus_list,
+        incomplete_locus_list,
+        missing_by_sample,
+    )
 
     print("Aggregated {} loci records from {} samples.".format(len(rows), len(samples)))
     for name, path in outputs.items():
