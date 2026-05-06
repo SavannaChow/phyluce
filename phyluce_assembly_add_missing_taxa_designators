@@ -91,7 +91,21 @@ def normalize_fasta_copy(input_path, output_path):
 def normalize_taxon_name(name):
     while name.startswith("_R_"):
         name = name[3:]
-    return name
+    return name.split("|")[0]
+
+
+def derive_all_taxa_from_alignments(fasta_files):
+    taxa = []
+    seen = set()
+    for fasta_path in fasta_files:
+        for header in parse_fasta(fasta_path):
+            sample_id = normalize_taxon_name(header)
+            if sample_id and sample_id not in seen:
+                seen.add(sample_id)
+                taxa.append(sample_id)
+    if not taxa:
+        raise RuntimeError("No taxa found across Stage 11 alignments.")
+    return sorted(taxa)
 
 
 def parse_analysis_branches(text):
@@ -605,7 +619,6 @@ def main():
         requested_threshold_groups,
         requested_filter_labels,
     )
-    all_taxa = read_all_taxa(args.aggregated_loci)
     output_root = Path(args.output_dir).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -613,6 +626,7 @@ def main():
     all_rows = []
     for row in selected_rows:
         fasta_files = discover_alignments(row["output_dir"])
+        all_taxa = derive_all_taxa_from_alignments(fasta_files)
         for branch in branches:
             print(
                 "[stage12:{}] {} / {} / {} ({})".format(
