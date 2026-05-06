@@ -340,6 +340,70 @@ def write_manifest(path, rows):
             writer.writerow(row)
 
 
+def read_tsv_rows(path):
+    if not Path(path).is_file():
+        return []
+    with open(path, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        if reader.fieldnames is None:
+            return []
+        return list(reader)
+
+
+def combo_key(row):
+    return (
+        row["trim_mode"],
+        row["dataset_label"],
+        row["filter_label"],
+    )
+
+
+def locus_key(row):
+    return combo_key(row) + (row["uce_locus"],)
+
+
+def sort_manifest_rows(rows):
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["trim_mode"],
+            row["dataset_label"],
+            float(row["completeness_threshold"]),
+            row["filter_label"],
+        ),
+    )
+
+
+def sort_summary_rows(rows):
+    return sorted(
+        rows,
+        key=lambda row: (
+            row["trim_mode"],
+            row["dataset_label"],
+            float(row["completeness_threshold"]),
+            row["filter_label"],
+            row["uce_locus"],
+        ),
+    )
+
+
+def merge_manifest_rows(existing_rows, new_rows):
+    replace_keys = {combo_key(row) for row in new_rows}
+    merged = [row for row in existing_rows if combo_key(row) not in replace_keys]
+    merged.extend(new_rows)
+    return sort_manifest_rows(merged)
+
+
+def merge_summary_rows(existing_rows, new_rows):
+    replace_keys = {combo_key(row) for row in new_rows}
+    merged = [row for row in existing_rows if combo_key(row) not in replace_keys]
+    merged.extend(new_rows)
+    deduped = {}
+    for row in merged:
+        deduped[locus_key(row)] = row
+    return sort_summary_rows(list(deduped.values()))
+
+
 def main():
     args = get_args()
     requested_datasets = parse_dataset_modes(args.threshold_groups)
@@ -361,14 +425,19 @@ def main():
             manifest_rows.append(manifest_row)
             all_rows.extend(summary_rows)
 
-    write_manifest(output_root / "threshold_manifest.tsv", manifest_rows)
-    write_filter_summary(output_root / "all_thresholds_filter_manifest.tsv", all_rows)
+    manifest_path = output_root / "threshold_manifest.tsv"
+    all_rows_path = output_root / "all_thresholds_filter_manifest.tsv"
+    merged_manifest_rows = merge_manifest_rows(read_tsv_rows(manifest_path), manifest_rows)
+    merged_all_rows = merge_summary_rows(read_tsv_rows(all_rows_path), all_rows)
+
+    write_manifest(manifest_path, merged_manifest_rows)
+    write_filter_summary(all_rows_path, merged_all_rows)
     print(
         "Finalized matrix completeness for {} trimmed branches across {} thresholds under {}".format(
             len(branches), len(completeness_thresholds), output_root
         )
     )
-    print("manifest\t{}".format(output_root / "threshold_manifest.tsv"))
+    print("manifest\t{}".format(manifest_path))
 
 
 if __name__ == "__main__":
