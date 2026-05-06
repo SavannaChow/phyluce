@@ -930,7 +930,7 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
     )
     if 11 in selected_stages and not cli_flag_present("--post-align-thresholds"):
         settings["post_align_thresholds"] = prompt_text_with_default(
-            "Stage 11 post-alignment completeness thresholds",
+            "Stage 11 post-alignment completeness thresholds (comma-separated)",
             post_align_thresholds_default,
         )
     else:
