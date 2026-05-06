@@ -2307,7 +2307,7 @@ def main():
             if settings["gblocks_path"] and settings["gblocks_path"] != "Gblocks"
             else require_executable(["Gblocks", "gblocks"])
         )
-    if settings["trim_mode"] == "both" and (args.end_stage >= 12):
+    if settings["trim_mode"] == "both" and (13 in selected_stages):
         raise RuntimeError(
             "trim_mode=both is available through Stage 12, but Stage 13 does not yet "
             "consume the new branch-aware Stage 12 outputs. Re-run with --end-stage 12, "
