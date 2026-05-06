@@ -31,11 +31,10 @@ STAGE_NAMES = {
     10: "10_Trimmed_Locus_ALIGNMENTS",
     11: "11_Filtered_Locus_ALIGNMENTS",
     12: "12_Analysis_Branches",
-    13: "13_Concatenated_SUPERMATRICES",
 }
 PROJECT_INFO_NAME = "project.info"
 INTERACTIVE_ACTIONS = {
-    "f": ("full", "Run full pipeline (01-13)"),
+    "f": ("full", "Run full pipeline (01-12)"),
     "1": ("stage1", "Run 01: Trim reads with fastp"),
     "2": ("stage2", "Run 02: Assemble contigs with SPAdes"),
     "3": ("stage3", "Run 03: Align UCE probes to contigs with minimap2"),
@@ -48,7 +47,6 @@ INTERACTIVE_ACTIONS = {
     "10": ("stage10", "Run 10: Apply trim strategy (edge/internal/both/none)"),
     "11": ("stage11", "Run 11: Filter locus alignments by taxa completeness"),
     "12": ("stage12", "Run 12: Dispatch supermatrix and gene-tree analysis branches"),
-    "13": ("stage13", "Run 13: Concatenate locus alignments"),
 }
 
 
@@ -233,14 +231,14 @@ def get_args():
     parser.add_argument(
         "--start-stage",
         type=int,
-        choices=range(1, 14),
+        choices=range(1, 13),
         default=None,
-        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci and define datasets, 8=Materialize dataset FASTAs, 9=Align dataset FASTAs, 10=Apply trim strategy, 11=Filter locus alignments by taxa completeness, 12=Dispatch supermatrix/gene-tree branches, 13=Concatenate alignments.",
+        help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci and define datasets, 8=Materialize dataset FASTAs, 9=Align dataset FASTAs, 10=Apply trim strategy, 11=Filter locus alignments by taxa completeness, 12=Dispatch supermatrix/gene-tree branches.",
     )
     parser.add_argument(
         "--end-stage",
         type=int,
-        choices=range(1, 14),
+        choices=range(1, 13),
         default=None,
         help="Stage number to end at.",
     )
@@ -419,14 +417,14 @@ def choose_action_interactively():
         )
     print("Choose workflow action:")
     print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
-    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"):
+    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f or 1-13): ").strip().lower()
+        answer = input("Enter choice (f or 1-12): ").strip().lower()
         if answer in INTERACTIVE_ACTIONS:
             key = INTERACTIVE_ACTIONS[answer][0]
             if key == "full":
-                return 1, 13
+                return 1, 12
             return int(key.replace("stage", "")), int(key.replace("stage", ""))
         print("Invalid choice.")
 
@@ -1653,28 +1651,6 @@ def build_add_missing_data_command(
     return command
 
 
-def build_concatenate_alignments_command(
-    script,
-    input_root,
-    output_root,
-    threshold_groups,
-    filter_labels,
-):
-    command = [
-        sys.executable,
-        str(script),
-        "--input-dir",
-        str(input_root),
-        "--output-dir",
-        str(output_root),
-    ]
-    if threshold_groups and str(threshold_groups).strip().lower() != "all":
-        command.extend(["--threshold-groups", str(threshold_groups)])
-    if filter_labels and str(filter_labels).strip().lower() != "all":
-        command.extend(["--filter-labels", str(filter_labels)])
-    return command
-
-
 def run_aggregate(aggregate_script, filter_root, aggregate_root, prefix, logger, log_root):
     aggregate_root.mkdir(parents=True, exist_ok=True)
     sqlite_path = aggregate_root / "{}.uce.sqlite".format(prefix)
@@ -1835,27 +1811,6 @@ def run_add_missing_data_designators(
         command,
         logger,
         log_path=log_root / "add_missing_data_designators.log",
-    )
-
-
-def run_concatenate_alignments(
-    script,
-    input_root,
-    output_root,
-    threshold_groups,
-    filter_labels,
-    logger,
-    log_root,
-):
-    output_root.mkdir(parents=True, exist_ok=True)
-    command = build_concatenate_alignments_command(
-        script, input_root, output_root, threshold_groups, filter_labels
-    )
-    logger.info("Concatenating locus alignments into supermatrices")
-    stream_process(
-        command,
-        logger,
-        log_path=log_root / "concatenate_alignments.log",
     )
 
 
@@ -2244,28 +2199,6 @@ def print_dry_run_plan(
             )
         )
         print("")
-    if 13 in selected_stages:
-        print("[concatenate_alignments]")
-        print(
-            "  concatenate_alignments:\n    {}".format(
-                format_command(
-                    build_concatenate_alignments_command(
-                        executables["concatenate_alignments"],
-                        stage_dirs["12_Analysis_Branches"],
-                        stage_dirs["13_Concatenated_SUPERMATRICES"],
-                        args.align_datasets,
-                        args.post_align_thresholds,
-                    )
-                )
-            )
-        )
-        print("  planned outputs:")
-        print(
-            "    threshold manifest: {}".format(
-                stage_dirs["13_Concatenated_SUPERMATRICES"] / "threshold_manifest.tsv"
-            )
-        )
-        print("")
     if 2 in selected_stages:
         print("[spades_summary]")
         print(
@@ -2307,17 +2240,6 @@ def main():
             if settings["gblocks_path"] and settings["gblocks_path"] != "Gblocks"
             else require_executable(["Gblocks", "gblocks"])
         )
-    if settings["trim_mode"] == "both" and (13 in selected_stages):
-        raise RuntimeError(
-            "trim_mode=both is available through Stage 12, but Stage 13 does not yet "
-            "consume the new branch-aware Stage 12 outputs. Re-run with --end-stage 12, "
-            "or skip Stage 13."
-        )
-    if 13 in selected_stages:
-        raise RuntimeError(
-            "Stage 13 is not yet adapted to the new Stage 12 branch outputs. "
-            "Stop at Stage 12 for now."
-        )
     decompressor = shutil.which("pigz") or shutil.which("gzip")
     if raw_dir is not None and 1 in selected_stages and decompressor is None and any(
         path.name.lower().endswith(GZ_FASTQ_EXTENSIONS)
@@ -2336,8 +2258,6 @@ def main():
     trim_locus_alignments_script = script_dir / "phyluce_assembly_trim_locus_alignments"
     filter_locus_alignments_script = script_dir / "phyluce_assembly_filter_locus_alignments_by_taxa"
     add_missing_data_script = script_dir / "phyluce_assembly_add_missing_taxa_designators"
-    concatenate_alignments_script = script_dir / "phyluce_assembly_concatenate_locus_alignments"
-
     probes_path = settings["probes"]
     if need_raw_samples:
         samples = find_raw_fastq_pairs(raw_dir)
@@ -2359,7 +2279,6 @@ def main():
         "trim_locus_alignments": trim_locus_alignments_script,
         "filter_locus_alignments": filter_locus_alignments_script,
         "add_missing_data_designators": add_missing_data_script,
-        "concatenate_alignments": concatenate_alignments_script,
         "mafft": mafft_path,
         "gblocks": gblocks_path,
     }
@@ -2636,17 +2555,6 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
-    if args.start_stage <= 13 <= args.end_stage:
-        run_concatenate_alignments(
-            concatenate_alignments_script,
-            stage_dirs["12_Analysis_Branches"],
-            stage_dirs["13_Concatenated_SUPERMATRICES"],
-            settings["align_datasets"],
-            settings["post_align_thresholds"],
-            logger,
-            stage_dirs["00_Log"],
-        )
-
     logger.info("Pipeline complete for {} samples.".format(len(samples)))
     logger.info("Logs: {}".format(stage_dirs["00_Log"]))
 

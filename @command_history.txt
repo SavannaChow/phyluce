@@ -63,3 +63,4 @@
 [2026-04-22 13:03:42] [from Darwin SavannaMacBookPro-9.local]  3713  ll
 [2026-04-22 13:03:44] [from Darwin SavannaMacBookPro-9.local]  3713  ll
 [2026-05-05 17:11:04] [from Darwin SavannaMacBookPro-9.local]  3885  python3 ./uce_length_bias_filter2.py ./matrix_all.tsv out2
+[2026-05-06 16:15:23] [from Darwin SavannaMacBookPro-9.local]  3906  brew install swiftbar
