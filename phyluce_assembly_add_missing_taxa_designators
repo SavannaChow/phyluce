@@ -82,6 +82,12 @@ def write_fasta(path, records):
             handle.write("{}\n".format(seq))
 
 
+def normalize_fasta_copy(input_path, output_path):
+    records = parse_fasta(input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_fasta(output_path, records)
+
+
 def normalize_taxon_name(name):
     while name.startswith("_R_"):
         name = name[3:]
@@ -485,8 +491,8 @@ def process_gene_tree_branch(row, fasta_files, output_root):
     summary_rows = []
     for fasta_path in fasta_files:
         output_path = out_alignments / fasta_path.name
-        shutil.copyfile(fasta_path, output_path)
-        records = parse_fasta(fasta_path)
+        normalize_fasta_copy(fasta_path, output_path)
+        records = parse_fasta(output_path)
         lengths = {len(seq) for seq in records.values()}
         alignment_length = next(iter(lengths)) if lengths else 0
         summary_row = build_base_row(row, "gene-tree", fasta_path, output_path)

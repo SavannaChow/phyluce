@@ -126,6 +126,20 @@ def alignment_taxa_and_length(path):
     return len(aln), aln.get_alignment_length()
 
 
+def write_alignment_fasta_single_line(path, alignment):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as handle:
+        for record in alignment:
+            handle.write(">{}\n".format(record.id))
+            handle.write("{}\n".format(str(record.seq)))
+
+
+def normalize_fasta_copy(input_path, output_path):
+    aln = AlignIO.read(str(input_path), "fasta")
+    write_alignment_fasta_single_line(output_path, aln)
+    return len(aln), aln.get_alignment_length()
+
+
 def trim_one_alignment_edge(path, output_path, args):
     input_taxa, input_length = alignment_taxa_and_length(path)
     aln = GenericAlign(str(path))
@@ -147,9 +161,7 @@ def trim_one_alignment_edge(path, output_path, args):
             "output_taxa": 0,
             "output_length": 0,
         }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as handle:
-        AlignIO.write(aln.trimmed, handle, "fasta")
+    write_alignment_fasta_single_line(output_path, aln.trimmed)
     output_taxa = len(aln.trimmed)
     output_length = aln.trimmed.get_alignment_length()
     return {
@@ -164,8 +176,7 @@ def trim_one_alignment_edge(path, output_path, args):
 
 def trim_one_alignment_none(path, output_path):
     input_taxa, input_length = alignment_taxa_and_length(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(path, output_path)
+    normalize_fasta_copy(path, output_path)
     return {
         "status": "copied",
         "reason": "",
@@ -228,9 +239,7 @@ def trim_one_alignment_internal(path, output_path, args):
                 "output_length": 0,
             }
         aln = AlignIO.read(str(trimmed_path), "fasta")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as handle:
-            AlignIO.write(aln, handle, "fasta")
+        write_alignment_fasta_single_line(output_path, aln)
         output_taxa = len(aln)
         output_length = aln.get_alignment_length()
         if output_length < args.min_length:

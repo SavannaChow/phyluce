@@ -237,8 +237,25 @@ def run_mafft(input_fasta, output_fasta, mafft_path):
         raise RuntimeError(
             "MAFFT failed for {}:\n{}".format(input_fasta, process.stderr.strip())
         )
-    with open(output_fasta, "w") as handle:
-        handle.write(process.stdout)
+    records = OrderedDict()
+    current_header = None
+    chunks = []
+    for raw_line in process.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(">"):
+            if current_header is not None:
+                records[current_header] = "".join(chunks)
+            current_header = line[1:]
+            chunks = []
+        else:
+            chunks.append(line)
+    if current_header is not None:
+        records[current_header] = "".join(chunks)
+    if not records:
+        raise RuntimeError("MAFFT produced no FASTA records for {}".format(input_fasta))
+    write_fasta(output_fasta, records)
     return process.stderr
 
 

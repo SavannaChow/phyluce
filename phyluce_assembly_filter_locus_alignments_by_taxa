@@ -221,6 +221,14 @@ def alignment_taxa(path):
     return len(aln)
 
 
+def write_alignment_fasta_single_line(path, alignment):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as handle:
+        for record in alignment:
+            handle.write(">{}\n".format(record.id))
+            handle.write("{}\n".format(str(record.seq)))
+
+
 def output_combo_root(output_dir, branch, filter_label):
     output_root = Path(output_dir).resolve()
     if branch["compatibility_mode"]:
@@ -251,7 +259,8 @@ def copy_alignments_for_branch(reference_dir, output_dir, branch, completeness_t
         keep = taxa_count >= min_count
         output_path = out_alignments / path.name if keep else None
         if keep:
-            shutil.copyfile(path, output_path)
+            aln = AlignIO.read(str(path), "fasta")
+            write_alignment_fasta_single_line(output_path, aln)
             kept += 1
         summary_rows.append(
             {
