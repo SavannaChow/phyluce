@@ -10,6 +10,12 @@ from pathlib import Path
 
 
 DATASET_CHOICES = ("complete", "incomplete")
+DATASET_ALIASES = {
+    "complete": "complete",
+    "complete_matrix": "complete",
+    "incomplete": "incomplete",
+    "incomplete_matrix": "incomplete",
+}
 
 
 def get_args():
@@ -77,15 +83,16 @@ def parse_dataset_modes(text):
         value = item.strip()
         if not value:
             continue
-        if value not in DATASET_CHOICES:
+        if value not in DATASET_ALIASES:
             raise RuntimeError(
                 "Unsupported dataset mode: {}. Expected one of {}".format(
-                    value, ", ".join(DATASET_CHOICES)
+                    value, ", ".join(sorted(DATASET_ALIASES))
                 )
             )
-        if value not in seen:
-            seen.add(value)
-            labels.append(value)
+        normalized = DATASET_ALIASES[value]
+        if normalized not in seen:
+            seen.add(normalized)
+            labels.append(normalized)
     if not labels:
         raise RuntimeError("No valid dataset modes were provided.")
     return labels
@@ -147,11 +154,21 @@ def write_fasta(path, records):
             handle.write("{}\n".format(sequence))
 
 
+def parse_sample_id_from_header(header):
+    record_id = header.split()[0]
+    if record_id.startswith("_R_"):
+        record_id = record_id[3:]
+    return record_id.split("|")[0]
+
+
 def read_dataset_taxa(input_dir, dataset_label):
     fasta_files = discover_locus_fastas(input_dir, dataset_label)
     taxa = set()
     for fasta_path in fasta_files:
-        taxa.update(parse_fasta(fasta_path).keys())
+        taxa.update(
+            parse_sample_id_from_header(header)
+            for header in parse_fasta(fasta_path).keys()
+        )
     if not taxa:
         raise RuntimeError("No taxa found across dataset {}".format(dataset_label))
     return sorted(taxa)
@@ -160,7 +177,7 @@ def read_dataset_taxa(input_dir, dataset_label):
 def resolve_matrix_mode(matrix_mode, dataset_label):
     if matrix_mode != "auto":
         return matrix_mode
-    if dataset_label == "complete":
+    if DATASET_ALIASES.get(dataset_label, dataset_label) == "complete":
         return "strict"
     return "incomplete"
 
