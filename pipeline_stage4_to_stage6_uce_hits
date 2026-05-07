@@ -93,11 +93,11 @@ def main():
     args = get_args()
     script_dir = os.path.dirname(os.path.abspath(__file__))
     paf_script = os.path.join(
-        script_dir, "phyluce_assembly_prepare_uce_hits_from_paf"
+        script_dir, "stage4_prepare_uce_hits_from_paf"
     )
-    filter_script = os.path.join(script_dir, "phyluce_assembly_filter_uce_hits_trace")
+    filter_script = os.path.join(script_dir, "stage5_filter_uce_hits_trace")
     extract_script = os.path.join(
-        script_dir, "phyluce_assembly_extract_uce_fasta_from_hits"
+        script_dir, "stage6_extract_per_sample_uce_fasta_records"
     )
 
     os.makedirs(args.output_dir, exist_ok=True)

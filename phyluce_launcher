@@ -2249,15 +2249,15 @@ def main():
         raise RuntimeError("Found .gz FASTQ files but neither pigz nor gzip is available.")
 
     script_dir = Path(__file__).resolve().parent
-    prepare_script = script_dir / "phyluce_assembly_prepare_uce_hits_from_paf"
-    filter_script = script_dir / "phyluce_assembly_filter_uce_hits_trace"
-    extract_script = script_dir / "phyluce_assembly_extract_uce_fasta_from_hits"
-    aggregate_script = script_dir / "phyluce_assembly_aggregate_filtered_loci"
-    export_locus_fastas_script = script_dir / "phyluce_assembly_export_locus_fastas"
-    align_locus_fastas_script = script_dir / "phyluce_assembly_align_locus_fastas"
-    trim_locus_alignments_script = script_dir / "phyluce_assembly_trim_locus_alignments"
-    filter_locus_alignments_script = script_dir / "phyluce_assembly_filter_locus_alignments_by_taxa"
-    add_missing_data_script = script_dir / "phyluce_assembly_add_missing_taxa_designators"
+    prepare_script = script_dir / "stage4_prepare_uce_hits_from_paf"
+    filter_script = script_dir / "stage5_filter_uce_hits_trace"
+    extract_script = script_dir / "stage6_extract_per_sample_uce_fasta_records"
+    aggregate_script = script_dir / "stage7_get_complete_incomplete_dataset_definitions"
+    export_locus_fastas_script = script_dir / "stage8_get_complete_incomplete_dataset_fastas"
+    align_locus_fastas_script = script_dir / "stage9_align_locus_fastas_with_mafft"
+    trim_locus_alignments_script = script_dir / "stage10_trim_alignments_with_edge_internal_methods"
+    filter_locus_alignments_script = script_dir / "stage11_get_loci_with_minimum_taxa_completeness"
+    add_missing_data_script = script_dir / "stage12_prepare_supermatrix_and_gene_tree_datasets"
     probes_path = settings["probes"]
     if need_raw_samples:
         samples = find_raw_fastq_pairs(raw_dir)

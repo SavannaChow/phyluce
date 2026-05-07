@@ -59,7 +59,7 @@ query_probes要使用者輸入路徑，或是讀取目前目錄下是否有fasta
 04_prepare_uce_hits_from_paf
 
 05_Filtering_uce_hits_trace
-跑phyluce_assembly_filter_uce_hits_trace
+跑stage5_filter_uce_hits_trace
 
 06_extract_uce_fasta_from_hits
 
