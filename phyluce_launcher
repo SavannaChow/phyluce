@@ -32,6 +32,7 @@ STAGE_NAMES = {
     11: "11_Filtered_Locus_ALIGNMENTS",
     12: "12_Analysis_Branches",
 }
+MAX_STAGE = max(STAGE_NAMES)
 PROJECT_INFO_NAME = "project.info"
 INTERACTIVE_ACTIONS = {
     "f": ("full", "Run full pipeline (01-12)"),
@@ -504,7 +505,7 @@ def infer_legacy_project_dir(current_dir, raw_dir):
     candidate = Path(current_dir) / Path(raw_dir).name
     if not candidate.is_dir():
         return None, None
-    if any((candidate / STAGE_NAMES[stage]).exists() for stage in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13)):
+    if any((candidate / name).exists() for name in STAGE_NAMES.values()):
         return candidate.name, candidate
     return None, None
 
@@ -579,7 +580,7 @@ def determine_stage_range(args):
     if args.start_stage is None and args.end_stage is None:
         if sys.stdin.isatty():
             return choose_action_interactively()
-        return 1, 13
+        return 1, MAX_STAGE
     if args.start_stage is None and args.end_stage is not None:
         return args.end_stage, args.end_stage
     if args.start_stage is not None and args.end_stage is None:
