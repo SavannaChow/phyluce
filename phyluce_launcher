@@ -510,6 +510,13 @@ def infer_legacy_project_dir(current_dir, raw_dir):
     return None, None
 
 
+def default_project_id_from_raw_dir(current_dir, raw_dir):
+    default_project_id = Path(raw_dir).name
+    if (Path(current_dir) / default_project_id).resolve() == Path(raw_dir).resolve():
+        return "{}_project".format(default_project_id)
+    return default_project_id
+
+
 def resolve_project_dir(current_dir, project_id_arg):
     if project_id_arg:
         project_id = project_id_arg.strip()
@@ -540,13 +547,13 @@ def resolve_project_path(current_dir, project_id_arg, raw_dir=None):
         legacy_project_id, legacy_project_dir = infer_legacy_project_dir(current_dir, raw_dir)
         if legacy_project_id:
             return legacy_project_id, legacy_project_dir
+        default_project_id = default_project_id_from_raw_dir(current_dir, raw_dir)
         if sys.stdin.isatty():
-            default_project_id = Path(raw_dir).name
             project_id = input("Enter project ID [{}]: ".format(default_project_id)).strip()
             if not project_id:
                 project_id = default_project_id
         else:
-            project_id = Path(raw_dir).name
+            project_id = default_project_id
     elif sys.stdin.isatty():
         project_id = input("Enter project ID: ").strip()
     else:
@@ -557,16 +564,24 @@ def resolve_project_path(current_dir, project_id_arg, raw_dir=None):
     return project_id, project_dir
 
 
+def is_new_project_dir(path):
+    if not path.is_dir():
+        return False
+    return not any(path.iterdir())
+
+
 def resolve_project_for_run(current_dir, project_id_arg, start_stage, raw_dir=None):
     project_id, project_dir = resolve_project_path(current_dir, project_id_arg, raw_dir=raw_dir)
     if project_dir.exists():
-        if start_stage == 1:
-            raise RuntimeError(
-                "Project directory already exists. Use a new --project-id, or resume "
-                "from a later stage with --start-stage > 1: {}".format(project_dir)
-            )
         if not project_dir.is_dir():
             raise RuntimeError("Project path exists but is not a directory: {}".format(project_dir))
+        if start_stage == 1:
+            if not is_new_project_dir(project_dir):
+                raise RuntimeError(
+                    "Project directory already exists and is not empty. Use a new "
+                    "--project-id, or resume from a later stage with --start-stage > 1: "
+                    "{}".format(project_dir)
+                )
     else:
         if start_stage > 1:
             raise RuntimeError(
