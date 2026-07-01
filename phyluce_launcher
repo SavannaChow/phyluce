@@ -125,6 +125,22 @@ def get_args():
         help="SPAdes coverage cutoff. Default is 2.",
     )
     parser.add_argument(
+        "--trimmed-reads-dir",
+        default=None,
+        help=(
+            "Directory containing Stage 1 trimmed reads for Stage 2, or receiving "
+            "Stage 1 output. Defaults to <project>/01_Trimmed."
+        ),
+    )
+    parser.add_argument(
+        "--spades-assembly-dir",
+        default=None,
+        help=(
+            "Directory where Stage 2 SPAdes assemblies are written. Defaults to "
+            "<project>/02_Spades_assembly."
+        ),
+    )
+    parser.add_argument(
         "--min-identity",
         type=float,
         default=0.8,
@@ -350,11 +366,27 @@ def get_stage_dirs(workdir):
     return {name: Path(workdir) / name for name in STAGE_NAMES.values()}
 
 
-def ensure_stage_dirs(workdir):
-    paths = get_stage_dirs(workdir)
+def ensure_stage_dirs(workdir, stage_dirs=None):
+    paths = stage_dirs if stage_dirs is not None else get_stage_dirs(workdir)
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
     return paths
+
+
+def resolve_configured_path(value, current_dir):
+    path = Path(str(value)).expanduser()
+    if not path.is_absolute():
+        path = Path(current_dir) / path
+    return path.resolve()
+
+
+def build_stage_dirs(project_dir, settings):
+    stage_dirs = get_stage_dirs(project_dir)
+    if settings.get("trimmed_reads_dir"):
+        stage_dirs["01_Trimmed"] = Path(settings["trimmed_reads_dir"])
+    if settings.get("spades_assembly_dir"):
+        stage_dirs["02_Spades_assembly"] = Path(settings["spades_assembly_dir"])
+    return stage_dirs
 
 
 def choose_directory(current_dir, label):
@@ -667,8 +699,40 @@ def prompt_text_with_default(message, default):
     return answer if answer else default
 
 
-def resolve_pipeline_settings(args, project_info, selected_stages, current_dir):
+def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, project_dir):
     settings = {}
+    default_stage_dirs = get_stage_dirs(project_dir)
+
+    def resolve_path_setting(key, arg_value, prompt_message, default_path, prompt_stages):
+        saved_value = project_info.get(key)
+        current = (
+            resolve_configured_path(saved_value, current_dir)
+            if saved_value not in (None, "N/A", "")
+            else Path(default_path).resolve()
+        )
+        flag = "--" + key.replace("_", "-")
+        if cli_flag_present(flag):
+            return resolve_configured_path(arg_value, current_dir)
+        if selected_stages & prompt_stages:
+            chosen = prompt_text_with_default(prompt_message, str(current))
+            return resolve_configured_path(chosen, current_dir)
+        return current
+
+    settings["trimmed_reads_dir"] = resolve_path_setting(
+        "trimmed_reads_dir",
+        args.trimmed_reads_dir,
+        "Stage 1/2 trimmed reads directory",
+        default_stage_dirs["01_Trimmed"],
+        {1, 2},
+    )
+    settings["spades_assembly_dir"] = resolve_path_setting(
+        "spades_assembly_dir",
+        args.spades_assembly_dir,
+        "Stage 2 SPAdes assembly output directory",
+        default_stage_dirs["02_Spades_assembly"],
+        {2},
+    )
+
     saved_probes = project_info.get("probes")
     if saved_probes == "N/A":
         saved_probes = None
@@ -1055,6 +1119,39 @@ def find_raw_fastq_pairs(workdir):
             "required naming rule.".format(len(raw_fastq_files), matched_count)
         )
     return {sample: (reads["1"], reads["2"]) for sample, reads in sorted(pairs.items())}
+
+
+def find_samples_from_trimmed(trimmed_root, strict=True):
+    trimmed_root = Path(trimmed_root)
+    if not trimmed_root.is_dir():
+        if strict:
+            raise RuntimeError("Trimmed reads directory not found: {}".format(trimmed_root))
+        return {}
+    samples = {}
+    incomplete = []
+    for sample_dir in sorted(trimmed_root.iterdir()):
+        if not sample_dir.is_dir() or sample_dir.name.startswith("."):
+            continue
+        sample = sample_dir.name
+        r1 = sample_dir / "{}_trimmed_R1.fastq".format(sample)
+        r2 = sample_dir / "{}_trimmed_R2.fastq".format(sample)
+        if r1.is_file() and r2.is_file():
+            samples[sample] = (r1, r2)
+        elif r1.exists() or r2.exists():
+            incomplete.append(sample)
+    if incomplete:
+        raise RuntimeError(
+            "Missing trimmed R1/R2 mate for samples: {}".format(
+                ", ".join(sorted(incomplete))
+            )
+        )
+    if not samples and strict:
+        raise RuntimeError(
+            "No trimmed FASTQ pairs found under {} (expect "
+            "<sample>/<sample>_trimmed_R1.fastq and "
+            "<sample>/<sample>_trimmed_R2.fastq).".format(trimmed_root)
+        )
+    return samples
 
 
 def find_samples_from_assembly(assembly_root, strict=True):
@@ -1905,8 +2002,8 @@ def print_dry_run_plan(
     for sample, raw_pair in samples.items():
         print("[{}]".format(sample))
         if raw_pair is not None:
-            print("  raw R1: {}".format(raw_pair[0]))
-            print("  raw R2: {}".format(raw_pair[1]))
+            print("  input R1: {}".format(raw_pair[0]))
+            print("  input R2: {}".format(raw_pair[1]))
         if 1 in selected_stages:
             fastp_cmd, fastp_out = build_fastp_command(
                 sample,
@@ -2231,13 +2328,14 @@ def main():
     if args.start_stage > args.end_stage:
         raise RuntimeError("--start-stage cannot be greater than --end-stage.")
     selected_stages = set(range(args.start_stage, args.end_stage + 1))
-    need_raw_samples = bool(selected_stages & {1, 2})
+    need_raw_samples = 1 in selected_stages
     need_assembly_samples = bool(selected_stages & {3, 4, 5, 6})
     current_dir = Path(os.getcwd()).resolve()
     raw_dir = resolve_raw_dir(current_dir, args.raw_dir) if need_raw_samples else None
     project_id, project_dir = resolve_project_path(current_dir, args.project_id, raw_dir=raw_dir)
     project_info = read_project_info(project_dir) or {}
-    settings = resolve_pipeline_settings(args, project_info, selected_stages, current_dir)
+    settings = resolve_pipeline_settings(args, project_info, selected_stages, current_dir, project_dir)
+    stage_dirs = build_stage_dirs(project_dir, settings)
 
     fastp_path = require_executable(["fastp"]) if 1 in selected_stages else None
     spades_path = require_executable(["spades.py"]) if 2 in selected_stages else None
@@ -2277,8 +2375,10 @@ def main():
     probes_path = settings["probes"]
     if need_raw_samples:
         samples = find_raw_fastq_pairs(raw_dir)
+    elif 2 in selected_stages:
+        samples = find_samples_from_trimmed(stage_dirs["01_Trimmed"], strict=not args.dry_run)
     elif need_assembly_samples:
-        assembly_root = project_dir / "02_Spades_assembly"
+        assembly_root = stage_dirs["02_Spades_assembly"]
         samples = find_samples_from_assembly(assembly_root, strict=not args.dry_run)
     else:
         samples = {}
@@ -2300,7 +2400,6 @@ def main():
     }
 
     if args.dry_run:
-        stage_dirs = get_stage_dirs(project_dir)
         print_dry_run_plan(
             current_dir,
             raw_dir,
@@ -2315,7 +2414,7 @@ def main():
         return
 
     project_id, project_dir = resolve_project_for_run(current_dir, project_id, args.start_stage, raw_dir=raw_dir)
-    stage_dirs = ensure_stage_dirs(project_dir)
+    stage_dirs = ensure_stage_dirs(project_dir, stage_dirs)
     logger = PipelineLogger(stage_dirs["00_Log"])
     existing_project_info = read_project_info(project_dir) or {}
     write_project_info(
@@ -2331,6 +2430,8 @@ def main():
                     else existing_project_info.get("raw_dir", "N/A"),
                 ),
                 ("probes", str(probes_path) if probes_path is not None else existing_project_info.get("probes", "N/A")),
+                ("trimmed_reads_dir", str(stage_dirs["01_Trimmed"])),
+                ("spades_assembly_dir", str(stage_dirs["02_Spades_assembly"])),
                 ("threads", settings["threads"]),
                 ("fastp_threads_per_job", settings["fastp_threads_per_job"]),
                 ("max_fastp_jobs", settings["max_fastp_jobs"] if settings["max_fastp_jobs"] is not None else "auto"),
@@ -2370,6 +2471,8 @@ def main():
             "project_dir": project_dir,
             "raw_dir": raw_dir or "N/A",
             "probes": probes_path or "N/A",
+            "trimmed_reads_dir": stage_dirs["01_Trimmed"],
+            "spades_assembly_dir": stage_dirs["02_Spades_assembly"],
             "threads": settings["threads"],
             "fastp_threads_per_job": settings["fastp_threads_per_job"],
             "max_fastp_jobs": settings["max_fastp_jobs"],
@@ -2416,6 +2519,8 @@ def main():
     logger.info("Project directory: {}".format(project_dir))
     if raw_dir is not None:
         logger.info("Raw FASTQ directory: {}".format(raw_dir))
+    logger.info("Trimmed reads directory: {}".format(stage_dirs["01_Trimmed"]))
+    logger.info("SPAdes assembly directory: {}".format(stage_dirs["02_Spades_assembly"]))
     if probes_path is not None:
         logger.info("Probe FASTA: {}".format(probes_path))
     if raw_dir is not None and 1 in selected_stages and decompressor:
