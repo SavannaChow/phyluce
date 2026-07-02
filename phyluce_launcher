@@ -17,6 +17,13 @@ FASTQ_PATTERN = re.compile(r"^(?P<sample>.+)_R(?P<read>[12])\.(?:fastq|fq)$", re
 FASTA_EXTENSIONS = (".fasta", ".fa", ".fna")
 GZ_FASTQ_EXTENSIONS = (".fastq.gz", ".fq.gz")
 FASTQ_EXTENSIONS = (".fastq", ".fq")
+SPADES_KEEP_FILES = {
+    "params.txt",
+    "run_spades.sh",
+    "run_spades.yaml",
+    "spades.log",
+    "contigs.fasta",
+}
 STAGE_NAMES = {
     0: "00_Log",
     1: "01_Trimmed",
@@ -123,6 +130,24 @@ def get_args():
         "--spades-cov-cutoff",
         default="2",
         help="SPAdes coverage cutoff. Default is 2.",
+    )
+    cleanup_group = parser.add_mutually_exclusive_group()
+    cleanup_group.add_argument(
+        "--cleanup-spades-temp",
+        dest="cleanup_spades_temp",
+        action="store_true",
+        default=None,
+        help=(
+            "After each successful Stage 2 SPAdes sample assembly, delete SPAdes "
+            "temporary outputs and keep only params.txt, run_spades.sh, "
+            "run_spades.yaml, spades.log, and contigs.fasta."
+        ),
+    )
+    cleanup_group.add_argument(
+        "--no-cleanup-spades-temp",
+        dest="cleanup_spades_temp",
+        action="store_false",
+        help="Disable Stage 2 SPAdes temporary output cleanup.",
     )
     parser.add_argument(
         "--trimmed-reads-dir",
@@ -692,11 +717,32 @@ def prompt_choice_with_default(message, default, choices):
         print("Please choose one of: {}".format(", ".join(choices)))
 
 
+def prompt_bool_with_default(message, default):
+    if not sys.stdin.isatty():
+        return default
+    default_label = "yes" if default else "no"
+    while True:
+        answer = input("{} [{}] (yes/no): ".format(message, default_label)).strip().lower()
+        if not answer:
+            return default
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("Please answer yes or no.")
+
+
 def prompt_text_with_default(message, default):
     if not sys.stdin.isatty():
         return default
     answer = input("{} [{}]: ".format(message, default)).strip()
     return answer if answer else default
+
+
+def saved_bool(value, default=False):
+    if value in (None, "N/A", ""):
+        return default
+    return str(value).strip().lower() in ("1", "true", "yes", "y")
 
 
 def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, project_dir):
@@ -826,6 +872,16 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, 
         settings["spades_cov_cutoff"] = (
             args.spades_cov_cutoff if cli_flag_present("--spades-cov-cutoff") else cov_cutoff_default
         )
+    cleanup_default = saved_bool(project_info.get("cleanup_spades_temp"), False)
+    if cli_flag_present("--cleanup-spades-temp") or cli_flag_present("--no-cleanup-spades-temp"):
+        settings["cleanup_spades_temp"] = bool(args.cleanup_spades_temp)
+    elif 2 in selected_stages:
+        settings["cleanup_spades_temp"] = prompt_bool_with_default(
+            "Clean SPAdes temporary files after each sample assembly",
+            cleanup_default,
+        )
+    else:
+        settings["cleanup_spades_temp"] = cleanup_default
     settings["min_identity"] = resolve_float(
         "min_identity",
         args.min_identity,
@@ -1351,8 +1407,11 @@ def write_contig_summary(sample, assembly_root):
     return summary
 
 
-def write_spades_summary_table(samples, assembly_root, logger):
-    summaries = [write_contig_summary(sample, assembly_root) for sample in samples]
+def write_spades_summary_table(samples, assembly_root, logger, write_sample_summaries=True):
+    if write_sample_summaries:
+        summaries = [write_contig_summary(sample, assembly_root) for sample in samples]
+    else:
+        summaries = [summarize_contigs(sample, assembly_root) for sample in samples]
     if not summaries:
         return
     summary_path = Path(assembly_root) / "assembly_summary.tsv"
@@ -1363,11 +1422,35 @@ def write_spades_summary_table(samples, assembly_root, logger):
     logger.info("Wrote SPAdes assembly summary: {}".format(summary_path))
 
 
-def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff, logger, log_root):
+def cleanup_spades_sample_dir(sample_out, logger):
+    sample_out = Path(sample_out)
+    if not sample_out.is_dir():
+        return
+    removed = 0
+    for path in sorted(sample_out.iterdir()):
+        if path.name in SPADES_KEEP_FILES:
+            continue
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        removed += 1
+    logger.info(
+        "Cleaned SPAdes temporary files in {} (removed {} items; kept {}).".format(
+            sample_out,
+            removed,
+            ", ".join(sorted(SPADES_KEEP_FILES)),
+        )
+    )
+
+
+def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff, cleanup_temp, logger, log_root):
     outputs = fastp_outputs(trimmed_root, sample)
     sample_out = assembly_root / sample
     contigs = sample_out / "contigs.fasta"
     if contigs.exists():
+        if cleanup_temp:
+            cleanup_spades_sample_dir(sample_out, logger)
         return
     sample_out.mkdir(parents=True, exist_ok=True)
     command = build_spades_command(
@@ -1379,6 +1462,8 @@ def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads
         logger,
         log_path=log_root / "spades.{}.log".format(sample),
     )
+    if cleanup_temp and contigs.exists():
+        cleanup_spades_sample_dir(sample_out, logger)
 
 
 def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff):
@@ -1402,7 +1487,7 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
     ]
 
 
-def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, logger, log_root):
+def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, cleanup_temp, logger, log_root):
     jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [
@@ -1415,6 +1500,7 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
                 per_job_threads,
                 memory_gb,
                 cov_cutoff,
+                cleanup_temp,
                 logger,
                 log_root,
             )
@@ -1422,7 +1508,12 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
         ]
         for future in concurrent.futures.as_completed(futures):
             future.result()
-    write_spades_summary_table(samples, assembly_root, logger)
+    write_spades_summary_table(
+        samples,
+        assembly_root,
+        logger,
+        write_sample_summaries=not cleanup_temp,
+    )
 
 
 def run_alignment_for_samples(samples, assembly_root, alignment_root, probes_path, minimap2_path, threads, logger, log_root):
@@ -1962,6 +2053,7 @@ def print_dry_run_plan(
     print("SPAdes threads/job: {}".format(args.spades_threads_per_job))
     print("SPAdes memory/job (GB): {}".format(args.spades_memory_gb))
     print("SPAdes cov-cutoff: {}".format(args.spades_cov_cutoff))
+    print("SPAdes cleanup temp files: {}".format("yes" if args.cleanup_spades_temp else "no"))
     print(
         "SPAdes max concurrent jobs: {}".format(
             concurrency_from_threads(
@@ -2439,6 +2531,7 @@ def main():
                 ("max_spades_jobs", settings["max_spades_jobs"] if settings["max_spades_jobs"] is not None else "auto"),
                 ("spades_memory_gb", settings["spades_memory_gb"]),
                 ("spades_cov_cutoff", settings["spades_cov_cutoff"]),
+                ("cleanup_spades_temp", settings["cleanup_spades_temp"]),
                 ("min_identity", settings["min_identity"]),
                 ("min_coverage", settings["min_coverage"]),
                 ("extract_mode", settings["extract_mode"]),
@@ -2480,6 +2573,7 @@ def main():
             "max_spades_jobs": settings["max_spades_jobs"],
             "spades_memory_gb": settings["spades_memory_gb"],
             "spades_cov_cutoff": settings["spades_cov_cutoff"],
+            "cleanup_spades_temp": settings["cleanup_spades_temp"],
             "min_identity": settings["min_identity"],
             "min_coverage": settings["min_coverage"],
             "extract_mode": settings["extract_mode"],
@@ -2552,6 +2646,7 @@ def main():
             settings["max_spades_jobs"],
             settings["spades_memory_gb"],
             settings["spades_cov_cutoff"],
+            settings["cleanup_spades_temp"],
             logger,
             stage_dirs["00_Log"],
         )
