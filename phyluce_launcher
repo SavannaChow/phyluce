@@ -1568,6 +1568,28 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
 
 def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, logger, log_root):
     jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
+    if jobs == 1:
+        for sample in samples:
+            run_spades(
+                sample,
+                trimmed_root,
+                assembly_root,
+                spades_path,
+                per_job_threads,
+                memory_gb,
+                cov_cutoff,
+                spades_tmp_root,
+                cleanup_temp,
+                logger,
+                log_root,
+            )
+        write_spades_summary_table(
+            samples,
+            assembly_root,
+            logger,
+            write_sample_summaries=not cleanup_temp,
+        )
+        return
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [
             executor.submit(
