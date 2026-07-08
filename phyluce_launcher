@@ -164,6 +164,23 @@ def get_args():
         action="store_false",
         help="Disable Stage 2 SPAdes temporary output cleanup.",
     )
+    fstrim_group = parser.add_mutually_exclusive_group()
+    fstrim_group.add_argument(
+        "--fstrim-spades-scratch",
+        dest="fstrim_spades_scratch",
+        action="store_true",
+        default=None,
+        help=(
+            "After each successful Stage 2 sample assembly, run sudo fstrim on the "
+            "configured SPAdes scratch disk."
+        ),
+    )
+    fstrim_group.add_argument(
+        "--no-fstrim-spades-scratch",
+        dest="fstrim_spades_scratch",
+        action="store_false",
+        help="Disable Stage 2 scratch-disk fstrim.",
+    )
     parser.add_argument(
         "--trimmed-reads-dir",
         default=None,
@@ -932,6 +949,18 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, 
             if saved_spades_tmp_dir
             else None
         )
+    fstrim_default = saved_bool(project_info.get("fstrim_spades_scratch"), False)
+    if settings["spades_tmp_dir"] is None:
+        settings["fstrim_spades_scratch"] = False
+    elif cli_flag_present("--fstrim-spades-scratch") or cli_flag_present("--no-fstrim-spades-scratch"):
+        settings["fstrim_spades_scratch"] = bool(args.fstrim_spades_scratch)
+    elif 2 in selected_stages:
+        settings["fstrim_spades_scratch"] = prompt_bool_with_default(
+            "Run fstrim on the SPAdes scratch disk after each completed sample",
+            fstrim_default,
+        )
+    else:
+        settings["fstrim_spades_scratch"] = fstrim_default
     cleanup_default = saved_bool(project_info.get("cleanup_spades_temp"), False)
     if cli_flag_present("--cleanup-spades-temp") or cli_flag_present("--no-cleanup-spades-temp"):
         settings["cleanup_spades_temp"] = bool(args.cleanup_spades_temp)
@@ -1510,6 +1539,23 @@ def spades_tmp_dir_for_sample(spades_tmp_root, assembly_root, sample):
     return Path(spades_tmp_root) / Path(assembly_root).parent.name / sample
 
 
+def require_sudo_for_fstrim(logger, log_root):
+    logger.info("Scratch-disk fstrim is enabled. Ensure you have sudo credentials ready.")
+    stream_process(
+        ["sudo", "-v"],
+        logger,
+        log_path=log_root / "sudo_fstrim_preauth.log",
+    )
+
+
+def run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root):
+    stream_process(
+        ["sudo", "fstrim", "-v", str(spades_tmp_root)],
+        logger,
+        log_path=log_root / "fstrim_spades_scratch.log",
+    )
+
+
 def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, logger, log_root):
     outputs = fastp_outputs(trimmed_root, sample)
     sample_out = assembly_root / sample
@@ -1517,7 +1563,7 @@ def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads
     if contigs.exists():
         if cleanup_temp:
             cleanup_spades_sample_dir(sample_out, logger)
-        return
+        return False
     sample_out.mkdir(parents=True, exist_ok=True)
     spades_tmp_dir = spades_tmp_dir_for_sample(spades_tmp_root, assembly_root, sample)
     if spades_tmp_dir is not None:
@@ -1540,6 +1586,7 @@ def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads
     )
     if cleanup_temp and contigs.exists():
         cleanup_spades_sample_dir(sample_out, logger)
+    return True
 
 
 def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff, spades_tmp_dir=None):
@@ -1566,11 +1613,17 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
     return command
 
 
-def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, logger, log_root):
+def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, fstrim_scratch, logger, log_root):
     jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
+    if fstrim_scratch:
+        if spades_tmp_root is None:
+            raise RuntimeError("Scratch-disk fstrim requires a configured SPAdes temporary directory.")
+        if jobs != 1:
+            raise RuntimeError("Scratch-disk fstrim requires Maximum concurrent SPAdes jobs = 1.")
+        require_sudo_for_fstrim(logger, log_root)
     if jobs == 1:
         for sample in samples:
-            run_spades(
+            ran_spades = run_spades(
                 sample,
                 trimmed_root,
                 assembly_root,
@@ -1583,6 +1636,8 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
                 logger,
                 log_root,
             )
+            if fstrim_scratch and ran_spades:
+                run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root)
         write_spades_summary_table(
             samples,
             assembly_root,
@@ -2156,6 +2211,7 @@ def print_dry_run_plan(
     print("SPAdes memory/job (GB): {}".format(args.spades_memory_gb))
     print("SPAdes cov-cutoff: {}".format(args.spades_cov_cutoff))
     print("SPAdes tmp directory: {}".format(args.spades_tmp_dir if args.spades_tmp_dir else "default"))
+    print("SPAdes scratch fstrim: {}".format("yes" if args.fstrim_spades_scratch else "no"))
     print("SPAdes cleanup temp files: {}".format("yes" if args.cleanup_spades_temp else "no"))
     print(
         "SPAdes max concurrent jobs: {}".format(
@@ -2640,6 +2696,7 @@ def main():
                 ("spades_memory_gb", settings["spades_memory_gb"]),
                 ("spades_cov_cutoff", settings["spades_cov_cutoff"]),
                 ("spades_tmp_dir", str(settings["spades_tmp_dir"]) if settings["spades_tmp_dir"] else "N/A"),
+                ("fstrim_spades_scratch", settings["fstrim_spades_scratch"]),
                 ("cleanup_spades_temp", settings["cleanup_spades_temp"]),
                 ("min_identity", settings["min_identity"]),
                 ("min_coverage", settings["min_coverage"]),
@@ -2683,6 +2740,7 @@ def main():
             "spades_memory_gb": settings["spades_memory_gb"],
             "spades_cov_cutoff": settings["spades_cov_cutoff"],
             "spades_tmp_dir": settings["spades_tmp_dir"] or "N/A",
+            "fstrim_spades_scratch": settings["fstrim_spades_scratch"],
             "cleanup_spades_temp": settings["cleanup_spades_temp"],
             "min_identity": settings["min_identity"],
             "min_coverage": settings["min_coverage"],
@@ -2730,6 +2788,11 @@ def main():
             settings["spades_tmp_dir"] if settings["spades_tmp_dir"] else "default"
         )
     )
+    logger.info(
+        "SPAdes scratch fstrim: {}".format(
+            "enabled" if settings["fstrim_spades_scratch"] else "disabled"
+        )
+    )
     if probes_path is not None:
         logger.info("Probe FASTA: {}".format(probes_path))
     if raw_dir is not None and 1 in selected_stages and decompressor:
@@ -2763,6 +2826,7 @@ def main():
             settings["spades_cov_cutoff"],
             settings["spades_tmp_dir"],
             settings["cleanup_spades_temp"],
+            settings["fstrim_spades_scratch"],
             logger,
             stage_dirs["00_Log"],
         )

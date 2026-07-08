@@ -68,3 +68,156 @@
 [2026-07-01 14:52:44] [from Darwin SavannaMacBookPro-10.local]  4617  xattr -cr '/Applications/usage.app/'
 [2026-07-02 10:39:14] [from Darwin SavannaMacBookPro-10.local]  4617  xattr -cr '/Applications/usage.app/'
 [2026-07-03 10:24:02] [from Darwin SavannaMacBookPro-10.local]  4617  xattr -cr '/Applications/usage.app/'
+[2026-07-03 11:03:54] [from Darwin SavannaMacBookPro-10.local]  4617  xattr -cr '/Applications/usage.app/'
+[2026-07-03 13:45:22] [from Darwin SavannaMacBookPro-10.local]  4702  	cat > cowman2023_TLS_master_accessions.txt <<'EOF'
+KHVT00000000
+KHVU00000000
+KHVV00000000
+KHVW00000000
+KHVX00000000
+KHVY00000000
+KHVZ00000000
+KHWA00000000
+KHWB00000000
+KHWC00000000
+KHWD00000000
+KHWE00000000
+KHWF00000000
+KHWG00000000
+KHWH00000000
+KHWI00000000
+KHWJ00000000
+KHWK00000000
+KHWL00000000
+KHWM00000000
+KHWN00000000
+KHWO00000000
+KHWP00000000
+KHWQ00000000
+KHWR00000000
+KHWS00000000
+KHWT00000000
+KHWU00000000
+KHWV00000000
+KHWW00000000
+KHWX00000000
+KHWY00000000
+KHWZ00000000
+KHXA00000000
+KHXB00000000
+KHXC00000000
+KHXD00000000
+KHXE00000000
+KHXF00000000
+KHXG00000000
+KHXH00000000
+KHXI00000000
+KHXJ00000000
+KHXK00000000
+KHXL00000000
+KHXM00000000
+KHXN00000000
+KHXO00000000
+KHXP00000000
+KHXQ00000000
+KHXR00000000
+KHXS00000000
+KHXT00000000
+KHXU00000000
+KHXV00000000
+KHXW00000000
+KHXX00000000
+KHXY00000000
+KHXZ00000000
+KHYA00000000
+KHYB00000000
+KHYC00000000
+KHYD00000000
+KHYE00000000
+KHYF00000000
+KHYG00000000
+KHYH00000000
+KHYI00000000
+KHYJ00000000
+KHYK00000000
+KHYL00000000
+KHYM00000000
+KHYN00000000
+KHYO00000000
+KHYP00000000
+KHYQ00000000
+KHYR00000000
+KHYS00000000
+KHYT00000000
+KHYU00000000
+KHYV00000000
+KHYW00000000
+KHYX00000000
+KHYY00000000
+KHYZ00000000
+KHZA00000000
+KHZB00000000
+KHZC00000000
+KHZD00000000
+KHZE00000000
+EOF
+
+echo -e "Accession	Definition	Organism" > cowman2023_TLS_definition_organism.tsv
+
+while read acc; do
+    echo ""
+    echo "========================================"
+    echo "查詢 $acc"
+    echo "========================================"
+
+    efetch -db nuccore -id "$acc" -format gb \n    | awk -v acc="$acc" '
+    BEGIN {
+        definition = ""
+        organism = ""
+        in_def = 0
+    }
+
+    /^DEFINITION/ {
+        in_def = 1
+        line = $0
+        sub(/^DEFINITION[[:space:]]+/, "", line)
+        definition = line
+        next
+    }
+
+    in_def && !/^[A-Z]/ {
+        line = $0
+        sub(/^[[:space:]]+/, "", line)
+        definition = definition " " line
+        next
+    }
+
+    in_def {
+        in_def = 0
+    }
+
+    /^  ORGANISM/ {
+        organism = $0
+        sub(/^  ORGANISM[[:space:]]+/, "", organism)
+    }
+
+    END {
+        if (definition == "") definition = "NA"
+        if (organism == "") organism = "NA"
+
+        print "Accession: " acc
+        print "DEFINITION: " definition
+        print "ORGANISM: " organism
+
+        gsub(/	/, " ", definition)
+        gsub(/	/, " ", organism)
+        print acc "	" definition "	" organism >> "cowman2023_TLS_definition_organism.tsv"
+    }'
+
+done < cowman2023_TLS_master_accessions.txt
+
+echo ""
+echo "完成"
+echo "輸出檔案：cowman2023_TLS_definition_organism.tsv"
+wc -l cowman2023_TLS_definition_organism.tsv
+[2026-07-08 11:49:56] [from Darwin SavannaMacBookPro-10.local]  4705  lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,MODEL
