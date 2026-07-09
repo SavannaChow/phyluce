@@ -9,6 +9,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import threading
 from collections import OrderedDict
 from pathlib import Path
 
@@ -1548,12 +1549,50 @@ def require_sudo_for_fstrim(logger, log_root):
     )
 
 
+def start_sudo_keepalive(logger, log_root, interval_seconds=60):
+    stop_event = threading.Event()
+
+    def keepalive():
+        while not stop_event.wait(interval_seconds):
+            result = subprocess.run(
+                ["sudo", "-n", "-v"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if result.returncode != 0:
+                logger.info(
+                    "sudo credential refresh failed; the next fstrim may require re-authentication."
+                )
+                return
+
+    thread = threading.Thread(target=keepalive, name="sudo-keepalive", daemon=True)
+    thread.start()
+    logger.info("Started sudo keepalive for scratch-disk fstrim.")
+    return stop_event, thread
+
+
+def stop_sudo_keepalive(stop_event, thread, logger):
+    stop_event.set()
+    thread.join(timeout=1)
+    logger.info("Stopped sudo keepalive for scratch-disk fstrim.")
+
+
 def run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root):
-    stream_process(
-        ["sudo", "fstrim", "-v", str(spades_tmp_root)],
-        logger,
-        log_path=log_root / "fstrim_spades_scratch.log",
-    )
+    try:
+        stream_process(
+            ["sudo", "-n", "fstrim", "-v", str(spades_tmp_root)],
+            logger,
+            log_path=log_root / "fstrim_spades_scratch.log",
+        )
+    except RuntimeError as exc:
+        logger.info(
+            "Skipping fstrim for {} and continuing: {}".format(
+                spades_tmp_root,
+                exc,
+            )
+        )
+        return False
+    return True
 
 
 def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, logger, log_root):
@@ -1615,36 +1654,42 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
 
 def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, fstrim_scratch, logger, log_root):
     jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
+    sudo_keepalive = None
     if fstrim_scratch:
         if spades_tmp_root is None:
             raise RuntimeError("Scratch-disk fstrim requires a configured SPAdes temporary directory.")
         if jobs != 1:
             raise RuntimeError("Scratch-disk fstrim requires Maximum concurrent SPAdes jobs = 1.")
         require_sudo_for_fstrim(logger, log_root)
+        sudo_keepalive = start_sudo_keepalive(logger, log_root)
     if jobs == 1:
-        for sample in samples:
-            ran_spades = run_spades(
-                sample,
-                trimmed_root,
+        try:
+            for sample in samples:
+                ran_spades = run_spades(
+                    sample,
+                    trimmed_root,
+                    assembly_root,
+                    spades_path,
+                    per_job_threads,
+                    memory_gb,
+                    cov_cutoff,
+                    spades_tmp_root,
+                    cleanup_temp,
+                    logger,
+                    log_root,
+                )
+                if fstrim_scratch and ran_spades:
+                    run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root)
+            write_spades_summary_table(
+                samples,
                 assembly_root,
-                spades_path,
-                per_job_threads,
-                memory_gb,
-                cov_cutoff,
-                spades_tmp_root,
-                cleanup_temp,
                 logger,
-                log_root,
+                write_sample_summaries=not cleanup_temp,
             )
-            if fstrim_scratch and ran_spades:
-                run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root)
-        write_spades_summary_table(
-            samples,
-            assembly_root,
-            logger,
-            write_sample_summaries=not cleanup_temp,
-        )
-        return
+            return
+        finally:
+            if sudo_keepalive is not None:
+                stop_sudo_keepalive(sudo_keepalive[0], sudo_keepalive[1], logger)
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [
             executor.submit(

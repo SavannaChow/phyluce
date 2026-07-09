@@ -221,3 +221,5 @@ echo "完成"
 echo "輸出檔案：cowman2023_TLS_definition_organism.tsv"
 wc -l cowman2023_TLS_definition_organism.tsv
 [2026-07-08 11:49:56] [from Darwin SavannaMacBookPro-10.local]  4705  lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,MODEL
+[2026-07-08 16:28:32] [from Darwin SavannaMacBookPro-10.local]  4705  lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,MODEL
+[2026-07-09 10:40:53] [from Darwin SavannaMacBookPro-10.local]  4705  lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,MODEL
