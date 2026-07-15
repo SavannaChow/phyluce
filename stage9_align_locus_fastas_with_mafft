@@ -51,6 +51,12 @@ def get_args():
         help="Maximum number of parallel MAFFT jobs.",
     )
     parser.add_argument(
+        "--mafft-threads",
+        type=int,
+        default=1,
+        help="Threads used by MAFFT for a single locus alignment.",
+    )
+    parser.add_argument(
         "--ambiguous",
         action="store_true",
         default=False,
@@ -218,9 +224,11 @@ def prefilter_locus(input_fasta, prefiltered_fasta, dataset_label, total_taxa, m
     }
 
 
-def run_mafft(input_fasta, output_fasta, mafft_path):
+def run_mafft(input_fasta, output_fasta, mafft_path, mafft_threads):
     command = [
         str(mafft_path),
+        "--thread",
+        str(mafft_threads),
         "--adjustdirection",
         "--maxiterate",
         "1000",
@@ -259,7 +267,7 @@ def run_mafft(input_fasta, output_fasta, mafft_path):
     return process.stderr
 
 
-def align_dataset(input_dir, output_dir, dataset_label, jobs, matrix_mode, allow_ambiguous, mafft_path):
+def align_dataset(input_dir, output_dir, dataset_label, jobs, mafft_threads, matrix_mode, allow_ambiguous, mafft_path):
     fasta_files = discover_locus_fastas(input_dir, dataset_label)
     total_taxa = len(read_dataset_taxa(input_dir, dataset_label))
     dataset_output = Path(output_dir).resolve() / dataset_label
@@ -321,7 +329,7 @@ def align_dataset(input_dir, output_dir, dataset_label, jobs, matrix_mode, allow
 
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as executor:
         futures = {
-            executor.submit(run_mafft, prefiltered_path, output_path, mafft_path): (
+            executor.submit(run_mafft, prefiltered_path, output_path, mafft_path, mafft_threads): (
                 prefiltered_path,
                 output_path,
                 locus_row,
@@ -406,6 +414,7 @@ def main():
             args.output_dir,
             dataset_label,
             args.jobs,
+            args.mafft_threads,
             args.matrix_mode,
             args.ambiguous,
             args.mafft_path,

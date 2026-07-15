@@ -256,6 +256,18 @@ def get_args():
         default=None,
         help="Path to the MAFFT executable for stage 9. Defaults to searching PATH.",
     )
+    parser.add_argument(
+        "--mafft-threads-per-job",
+        type=int,
+        default=None,
+        help="Threads used by MAFFT for a single locus alignment in stage 9.",
+    )
+    parser.add_argument(
+        "--max-mafft-jobs",
+        type=int,
+        default=None,
+        help="Maximum number of locus alignments to run concurrently in stage 9.",
+    )
     parser.add_argument("--trim-window", type=int, default=20, help="Stage 10 trimming window size.")
     parser.add_argument("--trim-proportion", type=float, default=0.65, help="Stage 10 trimming proportion parameter.")
     parser.add_argument("--trim-threshold", type=float, default=0.65, help="Stage 10 trimming threshold parameter.")
@@ -793,6 +805,40 @@ def saved_bool(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "y")
 
 
+def prompt_stage9_parallelism(total_threads, default_mafft_threads, default_mafft_jobs):
+    if not sys.stdin.isatty():
+        return default_mafft_threads, default_mafft_jobs
+    print("Stage 9 MAFFT parallelism")
+    while True:
+        print("  Available CPU threads on this computer: {}".format(total_threads))
+        mafft_threads = prompt_int_with_default(
+            "  Threads for one locus alignment",
+            default_mafft_threads,
+        )
+        max_jobs = prompt_int_with_default(
+            "  Number of locus alignments to run concurrently",
+            default_mafft_jobs,
+        )
+        total_used = mafft_threads * max_jobs
+        if total_used > total_threads:
+            print(
+                "  Invalid setting: {} x {} = {} threads, which exceeds {} available threads.".format(
+                    mafft_threads,
+                    max_jobs,
+                    total_used,
+                    total_threads,
+                )
+            )
+            continue
+        print("  Current setting:")
+        print("    available threads: {}".format(total_threads))
+        print("    threads per locus: {}".format(mafft_threads))
+        print("    concurrent alignments: {}".format(max_jobs))
+        print("    total threads used: {}".format(total_used))
+        if prompt_bool_with_default("  Is this setting correct", True):
+            return mafft_threads, max_jobs
+
+
 def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, project_dir):
     settings = {}
     default_stage_dirs = get_stage_dirs(project_dir)
@@ -1088,6 +1134,56 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, 
         )
     else:
         settings["mafft_path"] = args.mafft_path if cli_flag_present("--mafft-path") else mafft_default
+
+    saved_mafft_threads = project_info.get("mafft_threads_per_job")
+    mafft_threads_default = (
+        int(saved_mafft_threads)
+        if saved_mafft_threads not in (None, "N/A")
+        else 1
+    )
+    saved_mafft_jobs = project_info.get("max_mafft_jobs")
+    mafft_jobs_default = (
+        int(saved_mafft_jobs)
+        if saved_mafft_jobs not in (None, "N/A", "auto")
+        else settings["threads"]
+    )
+    if 9 in selected_stages and not (
+        cli_flag_present("--mafft-threads-per-job") or cli_flag_present("--max-mafft-jobs")
+    ):
+        (
+            settings["mafft_threads_per_job"],
+            settings["max_mafft_jobs"],
+        ) = prompt_stage9_parallelism(
+            settings["threads"],
+            mafft_threads_default,
+            mafft_jobs_default,
+        )
+    else:
+        settings["mafft_threads_per_job"] = (
+            args.mafft_threads_per_job
+            if cli_flag_present("--mafft-threads-per-job")
+            else mafft_threads_default
+        )
+        settings["max_mafft_jobs"] = (
+            args.max_mafft_jobs
+            if cli_flag_present("--max-mafft-jobs")
+            else mafft_jobs_default
+        )
+    if settings["mafft_threads_per_job"] <= 0 or settings["max_mafft_jobs"] <= 0:
+        raise RuntimeError(
+            "Stage 9 MAFFT settings must be positive integers: threads per locus={}, concurrent alignments={}.".format(
+                settings["mafft_threads_per_job"],
+                settings["max_mafft_jobs"],
+            )
+        )
+    if settings["mafft_threads_per_job"] * settings["max_mafft_jobs"] > settings["threads"]:
+        raise RuntimeError(
+            "Stage 9 MAFFT settings exceed available threads: {} threads per locus x {} concurrent alignments > {} total threads.".format(
+                settings["mafft_threads_per_job"],
+                settings["max_mafft_jobs"],
+                settings["threads"],
+            )
+        )
 
     def resolve_trim_value(key, arg_value, prompt_message):
         saved_value = project_info.get(key)
@@ -1917,6 +2013,7 @@ def build_align_locus_fastas_command(
     output_root,
     dataset_modes,
     jobs,
+    mafft_threads_per_job,
     align_ambiguous,
     align_matrix_mode,
     mafft_path,
@@ -1930,6 +2027,8 @@ def build_align_locus_fastas_command(
         str(output_root),
         "--jobs",
         str(jobs),
+        "--mafft-threads",
+        str(mafft_threads_per_job),
     ]
     if dataset_modes and str(dataset_modes).strip().lower() != "all":
         command.extend(["--dataset-modes", str(dataset_modes)])
@@ -2090,6 +2189,7 @@ def run_align_locus_fastas(
     output_root,
     dataset_modes,
     jobs,
+    mafft_threads_per_job,
     align_ambiguous,
     align_matrix_mode,
     mafft_path,
@@ -2103,6 +2203,7 @@ def run_align_locus_fastas(
         output_root,
         dataset_modes,
         jobs,
+        mafft_threads_per_job,
         align_ambiguous,
         align_matrix_mode,
         mafft_path,
@@ -2272,6 +2373,8 @@ def print_dry_run_plan(
     print("Stage 9 ambiguous bases: {}".format("keep" if args.align_ambiguous else "drop"))
     print("Stage 9 matrix mode: {}".format(args.align_matrix_mode))
     print("Stage 9 MAFFT path: {}".format(args.mafft_path))
+    print("Stage 9 MAFFT threads per locus: {}".format(args.mafft_threads_per_job))
+    print("Stage 9 MAFFT concurrent alignments: {}".format(args.max_mafft_jobs))
     print("Stage 10 trim window: {}".format(args.trim_window))
     print("Stage 10 trim proportion: {}".format(args.trim_proportion))
     print("Stage 10 trim threshold: {}".format(args.trim_threshold))
@@ -2497,7 +2600,8 @@ def print_dry_run_plan(
                         stage_dirs["08_Export_Locus_FASTAs"],
                         stage_dirs["09_Aligned_Locus_FASTAs"],
                         args.align_datasets,
-                        args.threads,
+                        args.max_mafft_jobs,
+                        args.mafft_threads_per_job,
                         args.align_ambiguous,
                         args.align_matrix_mode,
                         args.mafft_path,
@@ -2752,6 +2856,8 @@ def main():
                 ("align_ambiguous", settings["align_ambiguous"]),
                 ("align_matrix_mode", settings["align_matrix_mode"]),
                 ("mafft_path", mafft_path or settings["mafft_path"]),
+                ("mafft_threads_per_job", settings["mafft_threads_per_job"]),
+                ("max_mafft_jobs", settings["max_mafft_jobs"]),
                 ("trim_window", settings["trim_window"]),
                 ("trim_proportion", settings["trim_proportion"]),
                 ("trim_threshold", settings["trim_threshold"]),
@@ -2796,6 +2902,8 @@ def main():
             "align_ambiguous": settings["align_ambiguous"],
             "align_matrix_mode": settings["align_matrix_mode"],
             "mafft_path": mafft_path or settings["mafft_path"],
+            "mafft_threads_per_job": settings["mafft_threads_per_job"],
+            "max_mafft_jobs": settings["max_mafft_jobs"],
             "trim_window": settings["trim_window"],
             "trim_proportion": settings["trim_proportion"],
             "trim_threshold": settings["trim_threshold"],
@@ -2836,6 +2944,12 @@ def main():
     logger.info(
         "SPAdes scratch fstrim: {}".format(
             "enabled" if settings["fstrim_spades_scratch"] else "disabled"
+        )
+    )
+    logger.info(
+        "Stage 9 MAFFT parallelism: {} threads per locus x {} concurrent alignments".format(
+            settings["mafft_threads_per_job"],
+            settings["max_mafft_jobs"],
         )
     )
     if probes_path is not None:
@@ -2944,7 +3058,8 @@ def main():
             stage_dirs["08_Export_Locus_FASTAs"],
             stage_dirs["09_Aligned_Locus_FASTAs"],
             settings["align_datasets"],
-            settings["threads"],
+            settings["max_mafft_jobs"],
+            settings["mafft_threads_per_job"],
             settings["align_ambiguous"],
             settings["align_matrix_mode"],
             mafft_path or settings["mafft_path"],
