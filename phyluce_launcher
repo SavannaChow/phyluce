@@ -2994,6 +2994,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 1 complete")
     if args.start_stage <= 2 <= args.end_stage:
         run_spades_for_samples(
             samples,
@@ -3011,6 +3012,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 2 complete")
     if args.start_stage <= 3 <= args.end_stage:
         run_alignment_for_samples(
             samples,
@@ -3022,6 +3024,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 3 complete")
     if args.start_stage <= 4 <= args.end_stage:
         run_prepare_for_samples(
             samples,
@@ -3033,6 +3036,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 4 complete")
     if args.start_stage <= 5 <= args.end_stage:
         run_filter_for_samples(
             samples,
@@ -3043,6 +3047,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 5 complete")
     if args.start_stage <= 6 <= args.end_stage:
         run_extract_for_samples(
             samples,
@@ -3055,6 +3060,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 6 complete")
     if args.start_stage <= 7 <= args.end_stage:
         run_aggregate(
             aggregate_script,
@@ -3064,6 +3070,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 7 complete")
     if args.start_stage <= 8 <= args.end_stage:
         run_export_locus_fastas(
             export_locus_fastas_script,
@@ -3075,6 +3082,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 8 complete")
     if args.start_stage <= 9 <= args.end_stage:
         run_align_locus_fastas(
             align_locus_fastas_script,
@@ -3089,6 +3097,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 9 complete")
     if args.start_stage <= 10 <= args.end_stage:
         run_trim_locus_alignments(
             trim_locus_alignments_script,
@@ -3110,6 +3119,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 10 complete")
     if args.start_stage <= 11 <= args.end_stage:
         run_filter_locus_alignments(
             filter_locus_alignments_script,
@@ -3121,6 +3131,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 11 complete")
     if args.start_stage <= 12 <= args.end_stage:
         run_add_missing_data_designators(
             add_missing_data_script,
@@ -3134,6 +3145,7 @@ def main():
             logger,
             stage_dirs["00_Log"],
         )
+        logger.info("Stage 12 complete")
     logger.info("Pipeline complete for {} samples.".format(len(samples)))
     logger.info("Logs: {}".format(stage_dirs["00_Log"]))
 
