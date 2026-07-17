@@ -45,6 +45,15 @@ def get_args():
         default=r"^(.+?)(?:_p\d+.*)$",
         help="Regex used to convert Query name to the parent UCE locus. The first capture group is kept.",
     )
+    parser.add_argument(
+        "--max-locus-span",
+        type=int,
+        default=5000,
+        help=(
+            "Maximum allowed span, in bp, from the first to last probe hit for "
+            "one retained UCE-contig locus. Set to 0 to disable this filter."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -60,6 +69,7 @@ def parse_args_row(row, regex, line_number):
     start = int(parsed["Target start"])
     end = int(parsed["Target end"])
     parsed["_uce"] = match.group(1)
+    parsed["_uce_contig"] = (parsed["_uce"], parsed["Target name"])
     parsed["_target_start"] = min(start, end)
     parsed["_target_end"] = max(start, end)
     parsed["_line_number"] = line_number
@@ -99,6 +109,18 @@ def merge_intervals(intervals):
     return [tuple(item) for item in merged]
 
 
+def merge_cluster_intervals(intervals):
+    if not intervals:
+        return []
+    clusters = []
+    for start, end in sorted(intervals):
+        if not clusters or start > clusters[-1][1]:
+            clusters.append([start, end])
+        else:
+            clusters[-1][1] = max(clusters[-1][1], end)
+    return [tuple(item) for item in clusters]
+
+
 def infer_strand(rows):
     strands = [
         row.get("Relative strand", "").strip()
@@ -124,12 +146,42 @@ def build_groups(rows):
     return by_uce, by_contig, by_pair
 
 
-def find_multi_contig_uces(rows):
-    by_uce, _, _ = build_groups(rows)
-    bad_uces = {}
+def build_uce_clusters(rows):
+    by_uce = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        by_uce[row["_uce"]][row["Target name"]].append(
+            (row["_target_start"], row["_target_end"])
+        )
+    clusters = {}
     for uce, contigs in by_uce.items():
-        if len(contigs) > 1:
-            bad_uces[uce] = sorted(contigs)
+        clusters[uce] = []
+        for contig, intervals in contigs.items():
+            for start, end in merge_cluster_intervals(intervals):
+                clusters[uce].append(
+                    {
+                        "contig": contig,
+                        "start": start,
+                        "end": end,
+                        "span": end - start,
+                    }
+                )
+        clusters[uce].sort(key=lambda item: (item["contig"], item["start"], item["end"]))
+    return clusters
+
+
+def format_clusters(clusters):
+    return ",".join(
+        "{}:{}-{}".format(cluster["contig"], cluster["start"], cluster["end"])
+        for cluster in clusters
+    )
+
+
+def find_multi_cluster_uces(rows):
+    clusters_by_uce = build_uce_clusters(rows)
+    bad_uces = {}
+    for uce, clusters in clusters_by_uce.items():
+        if len(clusters) > 1:
+            bad_uces[uce] = clusters
     return bad_uces
 
 
@@ -155,6 +207,24 @@ def find_overlap_conflict_contigs(rows):
         if pairs:
             bad_contigs[contig] = sorted(pairs)
     return bad_contigs
+
+
+def find_excessive_span_locus_pairs(rows, max_locus_span):
+    if max_locus_span <= 0:
+        return {}
+    _, _, by_pair = build_groups(rows)
+    bad_pairs = {}
+    for pair, pair_rows in by_pair.items():
+        start = min(row["_target_start"] for row in pair_rows)
+        end = max(row["_target_end"] for row in pair_rows)
+        span = end - start
+        if span > max_locus_span:
+            uce, contig = pair
+            bad_pairs[pair] = (
+                "uce={} contig={} locus_span={} max_locus_span={} "
+                "target_range={}-{}"
+            ).format(uce, contig, span, max_locus_span, start, end)
+    return bad_pairs
 
 
 def initialize_trace(rows):
@@ -187,33 +257,51 @@ def mark_removed_rows(active_rows, trace, iteration, scope, reason, details_by_k
     return next_active
 
 
-def iteratively_filter_hits(rows):
+def iteratively_filter_hits(rows, max_locus_span):
     active = list(rows)
     trace = initialize_trace(rows)
     removed_uces = {}
     removed_contigs = {}
+    removed_spans = {}
     iteration = 0
     while True:
         iteration += 1
         changed = False
 
-        bad_uces = find_multi_contig_uces(active)
+        bad_uces = find_multi_cluster_uces(active)
         if bad_uces:
             changed = True
-            for uce, contigs in bad_uces.items():
-                removed_uces[uce] = contigs
+            for uce, clusters in bad_uces.items():
+                removed_uces[uce] = clusters
             uce_details = {
-                uce: "uce={} matched_multiple_contigs={}".format(uce, ",".join(contigs))
-                for uce, contigs in bad_uces.items()
+                uce: "uce={} matched_multiple_locus_clusters={}".format(
+                    uce,
+                    format_clusters(clusters),
+                )
+                for uce, clusters in bad_uces.items()
             }
             active = mark_removed_rows(
                 active,
                 trace,
                 iteration,
                 "uce",
-                "uce_matches_multiple_contigs",
+                "uce_matches_multiple_locus_clusters",
                 uce_details,
                 "_uce",
+            )
+
+        bad_spans = find_excessive_span_locus_pairs(active, max_locus_span)
+        if bad_spans:
+            changed = True
+            removed_spans.update(bad_spans)
+            active = mark_removed_rows(
+                active,
+                trace,
+                iteration,
+                "uce-contig",
+                "uce_contig_span_exceeds_max_locus_span",
+                bad_spans,
+                "_uce_contig",
             )
 
         bad_contigs = find_overlap_conflict_contigs(active)
@@ -241,7 +329,7 @@ def iteratively_filter_hits(rows):
         if not changed:
             break
 
-    return active, trace, removed_uces, removed_contigs
+    return active, trace, removed_uces, removed_contigs, removed_spans
 
 
 def write_hits(path, fieldnames, rows):
@@ -317,7 +405,7 @@ def write_trace(path, fieldnames, rows, trace):
             writer.writerow(record)
 
 
-def write_summary(path, all_rows, kept_rows, removed_uces, removed_contigs):
+def write_summary(path, all_rows, kept_rows, removed_uces, removed_contigs, removed_spans):
     all_uces = {row["_uce"] for row in all_rows}
     all_contigs = {row["Target name"] for row in all_rows}
     kept_uces = {row["_uce"] for row in kept_rows}
@@ -329,16 +417,20 @@ def write_summary(path, all_rows, kept_rows, removed_uces, removed_contigs):
         handle.write("Removed rows:\t{}\n".format(len(all_rows) - len(kept_rows)))
         handle.write("Input UCE loci:\t{}\n".format(len(all_uces)))
         handle.write("Retained UCE loci:\t{}\n".format(len(kept_uces)))
-        handle.write("Removed UCE loci (multi-contig):\t{}\n".format(len(removed_uces)))
+        handle.write("Removed UCE loci (multiple hit clusters):\t{}\n".format(len(removed_uces)))
+        handle.write("Removed UCE-contig loci (span too long):\t{}\n".format(len(removed_spans)))
         handle.write("Input contigs:\t{}\n".format(len(all_contigs)))
         handle.write("Retained contigs:\t{}\n".format(len(kept_contigs)))
         handle.write(
             "Removed contigs (overlapping multi-UCE):\t{}\n".format(len(removed_contigs))
         )
         handle.write("Retained UCE-contig loci:\t{}\n".format(len(kept_pairs)))
-        handle.write("\n[Removed UCE loci]\n")
+        handle.write("\n[Removed UCE loci by multiple hit clusters]\n")
         for uce in sorted(removed_uces):
-            handle.write("{}\t{}\n".format(uce, ",".join(removed_uces[uce])))
+            handle.write("{}\t{}\n".format(uce, format_clusters(removed_uces[uce])))
+        handle.write("\n[Removed UCE-contig loci by span]\n")
+        for uce, contig in sorted(removed_spans):
+            handle.write("{}\t{}\t{}\n".format(uce, contig, removed_spans[(uce, contig)]))
         handle.write("\n[Removed contigs]\n")
         for contig in sorted(removed_contigs):
             handle.write(
@@ -356,7 +448,10 @@ def main():
     args = get_args()
     regex = re.compile(args.regex)
     fieldnames, rows = read_hits(args.input, regex)
-    kept_rows, trace, removed_uces, removed_contigs = iteratively_filter_hits(rows)
+    kept_rows, trace, removed_uces, removed_contigs, removed_spans = iteratively_filter_hits(
+        rows,
+        args.max_locus_span,
+    )
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     write_hits(args.output, fieldnames, sorted(kept_rows, key=lambda row: row["_line_number"]))
     write_trace(args.trace_output, fieldnames, rows, trace)
@@ -372,10 +467,15 @@ def main():
             sorted(kept_rows, key=lambda row: row["_line_number"]),
             removed_uces,
             removed_contigs,
+            removed_spans,
         )
     sys.stderr.write(
-        "Retained {} of {} rows; removed {} multi-contig UCE loci and {} overlapping multi-UCE contigs.\n".format(
-            len(kept_rows), len(rows), len(removed_uces), len(removed_contigs)
+        "Retained {} of {} rows; removed {} multi-cluster UCE loci, {} over-span UCE-contig loci, and {} overlapping multi-UCE contigs.\n".format(
+            len(kept_rows),
+            len(rows),
+            len(removed_uces),
+            len(removed_spans),
+            len(removed_contigs),
         )
     )
 

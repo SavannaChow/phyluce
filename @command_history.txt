@@ -225,3 +225,4 @@ wc -l cowman2023_TLS_definition_organism.tsv
 [2026-07-09 10:40:53] [from Darwin SavannaMacBookPro-10.local]  4705  lsblk -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINTS,MODEL
 [2026-07-15 10:43:28] [from Darwin SavannaMacBookPro-10.local]  4709  ollama stop
 [2026-07-15 13:10:33] [from Darwin SavannaMacBookPro-10.local]  4709  ollama stop
+[2026-07-17 12:16:43] [from Darwin SavannaMacBookPro-10.local]  4710  xattr -cr '/Applications/usage.app/'

@@ -63,6 +63,15 @@ def get_args():
         help="Minimum Coverage for the PAF-to-UCE-hits preparation step.",
     )
     parser.add_argument(
+        "--max-locus-span",
+        type=int,
+        default=5000,
+        help=(
+            "Maximum allowed span, in bp, from the first to last probe hit for "
+            "one retained UCE-contig locus. Set to 0 to disable this filter."
+        ),
+    )
+    parser.add_argument(
         "--reverse-complement-negative",
         action="store_true",
         default=False,
@@ -161,6 +170,8 @@ def main():
         filter_summary,
         "--regex",
         args.regex,
+        "--max-locus-span",
+        str(args.max_locus_span),
     ]
     run_command(filter_cmd)
 
@@ -206,7 +217,8 @@ def main():
         "Simple FASTA: {}\n"
         "Name map: {}\n"
         "Extract mode: {}\n"
-        "Flank: {}\n".format(
+        "Flank: {}\n"
+        "Max locus span: {}\n".format(
             prepared_full,
             prepared_hits,
             filtered_hits,
@@ -218,6 +230,7 @@ def main():
             name_map,
             args.extract_mode,
             args.flank,
+            args.max_locus_span,
         )
     )
 

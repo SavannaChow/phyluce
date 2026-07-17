@@ -211,6 +211,15 @@ def get_args():
         help="Minimum Coverage for the PAF-to-UCE-hits preparation step.",
     )
     parser.add_argument(
+        "--max-locus-span",
+        type=int,
+        default=5000,
+        help=(
+            "Maximum allowed span, in bp, from the first to last probe hit for "
+            "one retained UCE-contig locus. Set to 0 to disable this filter."
+        ),
+    )
+    parser.add_argument(
         "--extract-mode",
         choices=["full-contig", "slice"],
         default="full-contig",
@@ -1031,6 +1040,13 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, 
         "Minimum coverage for PAF filtering",
         args.min_coverage,
         {4},
+    )
+    settings["max_locus_span"] = resolve_int(
+        "max_locus_span",
+        args.max_locus_span,
+        "Maximum UCE-contig locus span for filtering",
+        args.max_locus_span,
+        {5},
     )
 
     saved_mode = project_info.get("extract_mode")
@@ -1889,7 +1905,7 @@ def build_prepare_command(sample, alignment_root, prepare_root, prepare_script, 
         ]
 
 
-def run_filter_for_samples(samples, prepare_root, filter_root, filter_script, logger, log_root):
+def run_filter_for_samples(samples, prepare_root, filter_root, filter_script, max_locus_span, logger, log_root):
     for sample in samples:
         sample_dir = filter_root / sample
         sample_dir.mkdir(parents=True, exist_ok=True)
@@ -1897,7 +1913,7 @@ def run_filter_for_samples(samples, prepare_root, filter_root, filter_script, lo
         if filtered_hits.exists():
             continue
         input_hits = prepare_root / sample / "{}.paf_UCE_hits.tsv".format(sample)
-        command = build_filter_command(sample, prepare_root, filter_root, filter_script)
+        command = build_filter_command(sample, prepare_root, filter_root, filter_script, max_locus_span)
         logger.info("Filtering UCE hits for {}".format(sample))
         stream_process(
             command,
@@ -1906,7 +1922,7 @@ def run_filter_for_samples(samples, prepare_root, filter_root, filter_script, lo
         )
 
 
-def build_filter_command(sample, prepare_root, filter_root, filter_script):
+def build_filter_command(sample, prepare_root, filter_root, filter_script, max_locus_span):
     sample_dir = filter_root / sample
     filtered_hits = sample_dir / "{}.filtered.tsv".format(sample)
     input_hits = prepare_root / sample / "{}.paf_UCE_hits.tsv".format(sample)
@@ -1923,6 +1939,8 @@ def build_filter_command(sample, prepare_root, filter_root, filter_script):
             str(sample_dir / "{}.filtered.loci.tsv".format(sample)),
             "--summary",
             str(sample_dir / "{}.filtered.summary.txt".format(sample)),
+            "--max-locus-span",
+            str(max_locus_span),
         ]
 
 
@@ -2368,6 +2386,7 @@ def print_dry_run_plan(
     )
     print("Extract mode: {}".format(args.extract_mode))
     print("Flank: {}".format(args.flank))
+    print("Max UCE-contig locus span: {}".format(args.max_locus_span))
     print("Stage 8 dataset modes: {}".format(args.dataset_modes))
     print("Stage 9 align datasets: {}".format(args.align_datasets))
     print("Stage 9 ambiguous bases: {}".format("keep" if args.align_ambiguous else "drop"))
@@ -2478,6 +2497,7 @@ def print_dry_run_plan(
                             stage_dirs["04_prepare_uce_hits_from_paf"],
                             stage_dirs["05_Filtering_uce_hits_trace"],
                             executables["filter"],
+                            args.max_locus_span,
                         )
                     )
                 )
@@ -2849,6 +2869,7 @@ def main():
                 ("cleanup_spades_temp", settings["cleanup_spades_temp"]),
                 ("min_identity", settings["min_identity"]),
                 ("min_coverage", settings["min_coverage"]),
+                ("max_locus_span", settings["max_locus_span"]),
                 ("extract_mode", settings["extract_mode"]),
                 ("flank", settings["flank"]),
                 ("dataset_modes", settings["dataset_modes"]),
@@ -2895,6 +2916,7 @@ def main():
             "cleanup_spades_temp": settings["cleanup_spades_temp"],
             "min_identity": settings["min_identity"],
             "min_coverage": settings["min_coverage"],
+            "max_locus_span": settings["max_locus_span"],
             "extract_mode": settings["extract_mode"],
             "flank": settings["flank"],
             "dataset_modes": settings["dataset_modes"],
@@ -3017,6 +3039,7 @@ def main():
             stage_dirs["04_prepare_uce_hits_from_paf"],
             stage_dirs["05_Filtering_uce_hits_trace"],
             filter_script,
+            settings["max_locus_span"],
             logger,
             stage_dirs["00_Log"],
         )
