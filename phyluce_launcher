@@ -681,16 +681,33 @@ def is_new_project_dir(path):
     return not any(path.iterdir())
 
 
+def is_reusable_project_dir(path):
+    if not path.is_dir():
+        return False
+    if read_project_info(path):
+        return True
+    return any((path / name).exists() for name in STAGE_NAMES.values())
+
+
 def resolve_project_for_run(current_dir, project_id_arg, start_stage, raw_dir=None):
-    project_id, project_dir = resolve_project_path(current_dir, project_id_arg, raw_dir=raw_dir)
+    project_id, project_dir = resolve_project_path(
+        current_dir, project_id_arg, raw_dir=raw_dir
+    )
     if project_dir.exists():
         if not project_dir.is_dir():
-            raise RuntimeError("Project path exists but is not a directory: {}".format(project_dir))
+            raise RuntimeError(
+                "Project path exists but is not a directory: {}".format(project_dir)
+            )
         if start_stage == 1:
-            if not is_new_project_dir(project_dir):
+            if (
+                not is_new_project_dir(project_dir)
+                and not is_reusable_project_dir(project_dir)
+            ):
                 raise RuntimeError(
-                    "Project directory already exists and is not empty. Use a new "
-                    "--project-id, or resume from a later stage with --start-stage > 1: "
+                    "Project directory already exists but does not look like a "
+                    "phyluce launcher project. Use a new --project-id, choose an "
+                    "existing project directory, or resume from a later stage "
+                    "with --start-stage > 1: "
                     "{}".format(project_dir)
                 )
     else:
@@ -1516,13 +1533,26 @@ def run_fastp(sample, raw_pair, trimmed_root, fastp_path, threads_per_job, logge
     outputs["sample_dir"].mkdir(parents=True, exist_ok=True)
     outputs["report_dir"].mkdir(parents=True, exist_ok=True)
     if outputs["r1"].exists() and outputs["r2"].exists():
-        return
+        logger.info(
+            "Skipping fastp for {}; trimmed FASTQ pair already exists.".format(
+                sample
+            )
+        )
+        return False
+    if outputs["r1"].exists() or outputs["r2"].exists():
+        raise RuntimeError(
+            "Incomplete fastp output for sample {}. Remove the partial trimmed "
+            "sample directory before rerunning: {}".format(
+                sample, outputs["sample_dir"]
+            )
+        )
     logger.info("Running fastp for {}".format(sample))
     stream_process(
         command,
         logger,
         log_path=log_root / "fastp.{}.log".format(sample),
     )
+    return True
 
 
 def concurrency_from_threads(total_threads, per_job, override):
@@ -1714,6 +1744,9 @@ def run_spades(sample, trimmed_root, assembly_root, spades_path, per_job_threads
     if contigs.exists():
         if cleanup_temp:
             cleanup_spades_sample_dir(sample_out, logger)
+        logger.info(
+            "Skipping SPAdes for {}; contigs.fasta already exists.".format(sample)
+        )
         return False
     sample_out.mkdir(parents=True, exist_ok=True)
     spades_tmp_dir = spades_tmp_dir_for_sample(spades_tmp_root, assembly_root, sample)
@@ -1836,6 +1869,9 @@ def run_alignment_for_samples(samples, assembly_root, alignment_root, probes_pat
         sample_dir.mkdir(parents=True, exist_ok=True)
         paf = sample_dir / "{}.paf".format(sample)
         if paf.exists():
+            logger.info(
+                "Skipping minimap2 for {}; PAF already exists.".format(sample)
+            )
             continue
         contigs = assembly_root / sample / "contigs.fasta"
         if not contigs.exists():
