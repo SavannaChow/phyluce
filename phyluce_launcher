@@ -1029,7 +1029,7 @@ def resolve_pipeline_settings(args, project_info, selected_stages, current_dir, 
         settings["fstrim_spades_scratch"] = bool(args.fstrim_spades_scratch)
     elif 2 in selected_stages:
         settings["fstrim_spades_scratch"] = prompt_bool_with_default(
-            "Run fstrim on the SPAdes scratch disk after each completed sample",
+            "Run fstrim on the SPAdes scratch disk after assembly jobs complete",
             fstrim_default,
         )
     else:
@@ -1803,10 +1803,15 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
     if fstrim_scratch:
         if spades_tmp_root is None:
             raise RuntimeError("Scratch-disk fstrim requires a configured SPAdes temporary directory.")
-        if jobs != 1:
-            raise RuntimeError("Scratch-disk fstrim requires Maximum concurrent SPAdes jobs = 1.")
         require_sudo_for_fstrim(logger, log_root)
         sudo_keepalive = start_sudo_keepalive(logger, log_root)
+        if jobs > 1:
+            logger.info(
+                "SPAdes is running with {} concurrent jobs; scratch-disk "
+                "fstrim will run once after all concurrent assemblies finish.".format(
+                    jobs
+                )
+            )
     if jobs == 1:
         try:
             for sample in samples:
@@ -1835,26 +1840,33 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
         finally:
             if sudo_keepalive is not None:
                 stop_sudo_keepalive(sudo_keepalive[0], sudo_keepalive[1], logger)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-        futures = [
-            executor.submit(
-                run_spades,
-                sample,
-                trimmed_root,
-                assembly_root,
-                spades_path,
-                per_job_threads,
-                memory_gb,
-                cov_cutoff,
-                spades_tmp_root,
-                cleanup_temp,
-                logger,
-                log_root,
-            )
-            for sample in samples
-        ]
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
+    ran_any_spades = False
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
+            futures = [
+                executor.submit(
+                    run_spades,
+                    sample,
+                    trimmed_root,
+                    assembly_root,
+                    spades_path,
+                    per_job_threads,
+                    memory_gb,
+                    cov_cutoff,
+                    spades_tmp_root,
+                    cleanup_temp,
+                    logger,
+                    log_root,
+                )
+                for sample in samples
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                ran_any_spades = future.result() or ran_any_spades
+        if fstrim_scratch and ran_any_spades:
+            run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root)
+    finally:
+        if sudo_keepalive is not None:
+            stop_sudo_keepalive(sudo_keepalive[0], sudo_keepalive[1], logger)
     write_spades_summary_table(
         samples,
         assembly_root,
