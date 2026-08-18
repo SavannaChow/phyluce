@@ -354,6 +354,29 @@ def write_charset_nexus(path, partitions):
         handle.write("END;\n")
 
 
+def write_iqtree_script(path, phylip_path, charset_path):
+    command = [
+        "iqtree",
+        "-s",
+        "./{}".format(phylip_path.name),
+        "-p",
+        "./{}".format(charset_path.name),
+        "-m",
+        "MFP+MERGE",
+        "-rcluster",
+        "10",
+        "-T",
+        "AUTO",
+        "-B",
+        "1000",
+    ]
+    with open(path, "w") as handle:
+        handle.write("#!/usr/bin/env bash\n")
+        handle.write("set -euo pipefail\n\n")
+        handle.write("{}\n".format(" ".join(command)))
+    path.chmod(0o755)
+
+
 def concatenate_alignments(alignments_dir, output_root, output_prefix):
     files = sorted(Path(alignments_dir).glob("*.fasta"))
     if not files:
@@ -401,6 +424,7 @@ def concatenate_alignments(alignments_dir, output_root, output_prefix):
     charset_plain_out = raxml_root / "{}.charsets".format(output_prefix)
     charset_nexus_out = raxml_root / "{}.charsets.nexus".format(output_prefix)
     partition_plain_out = raxml_root / "{}.partitions".format(output_prefix)
+    iqtree_script_out = raxml_root / "run_iqtree_{}.sh".format(output_prefix)
     nexus_out = mrbayes_root / "{}.nexus".format(output_prefix)
 
     write_fasta(fasta_out, concatenated)
@@ -419,6 +443,7 @@ def concatenate_alignments(alignments_dir, output_root, output_prefix):
     with open(partition_plain_out, "w") as handle:
         for row in partitions:
             handle.write("DNA, {} = {}-{}\n".format(row["locus"], row["start"], row["end"]))
+    write_iqtree_script(iqtree_script_out, phylip_out, charset_nexus_out)
 
     return {
         "loci_concatenated": len(files),
@@ -431,6 +456,7 @@ def concatenate_alignments(alignments_dir, output_root, output_prefix):
         "charset_file": str(charset_plain_out),
         "charset_nexus_file": str(charset_nexus_out),
         "partition_file": str(partition_plain_out),
+        "iqtree_script": str(iqtree_script_out),
         "analysis_output_dir": str(output_root),
         "raxml_iqtree_dir": str(raxml_root),
         "mrbayes_dir": str(mrbayes_root),
@@ -508,6 +534,7 @@ def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_
         "charset_file": concat_result["charset_file"],
         "charset_nexus_file": concat_result["charset_nexus_file"],
         "partition_file": concat_result["partition_file"],
+        "iqtree_script": concat_result["iqtree_script"],
         "analysis_output_dir": concat_result["analysis_output_dir"],
         "raxml_iqtree_dir": concat_result["raxml_iqtree_dir"],
         "mrbayes_dir": concat_result["mrbayes_dir"],
@@ -561,6 +588,7 @@ def process_gene_tree_branch(row, fasta_files, output_root):
         "charset_file": "",
         "charset_nexus_file": "",
         "partition_file": "",
+        "iqtree_script": "",
         "analysis_output_dir": "",
         "raxml_iqtree_dir": "",
         "mrbayes_dir": "",
@@ -615,6 +643,7 @@ def write_manifest(path, rows):
         "charset_file",
         "charset_nexus_file",
         "partition_file",
+        "iqtree_script",
         "analysis_output_dir",
         "raxml_iqtree_dir",
         "mrbayes_dir",

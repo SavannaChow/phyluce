@@ -101,3 +101,67 @@ def test_fastp_skips_completed_sample(tmp_path):
     assert messages == [
         "Skipping fastp for sampleA; trimmed FASTQ pair already exists."
     ]
+
+
+def test_parallel_spades_runs_fstrim_after_concurrent_batch(monkeypatch, tmp_path):
+    launcher = load_launcher()
+    calls = []
+
+    class Logger:
+        def info(self, message):
+            calls.append(("log", message))
+
+    def fake_run_spades(sample, *args):
+        calls.append(("spades", sample))
+        return sample == "new_sample"
+
+    def fake_fstrim(spades_tmp_root, logger, log_root):
+        calls.append(("fstrim", str(spades_tmp_root)))
+        return True
+
+    monkeypatch.setattr(
+        launcher,
+        "require_sudo_for_fstrim",
+        lambda logger, log_root: calls.append(("sudo", str(log_root))),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "start_sudo_keepalive",
+        lambda logger, log_root: (
+            calls.append(("keepalive_start", str(log_root))) or (object(), object())
+        ),
+    )
+    monkeypatch.setattr(
+        launcher,
+        "stop_sudo_keepalive",
+        lambda stop_event, thread, logger: calls.append(("keepalive_stop", None)),
+    )
+    monkeypatch.setattr(launcher, "run_spades", fake_run_spades)
+    monkeypatch.setattr(launcher, "run_fstrim_for_spades_scratch", fake_fstrim)
+    monkeypatch.setattr(
+        launcher, "write_spades_summary_table", lambda *args, **kwargs: None
+    )
+
+    launcher.run_spades_for_samples(
+        {"old_sample": None, "new_sample": None},
+        tmp_path / "01_Trimmed",
+        tmp_path / "02_Spades_assembly",
+        "spades.py",
+        72,
+        32,
+        2,
+        110,
+        "2",
+        tmp_path / "scratch",
+        True,
+        True,
+        Logger(),
+        tmp_path / "00_Log",
+    )
+
+    fstrim_call = ("fstrim", str(tmp_path / "scratch"))
+    assert fstrim_call in calls
+    assert calls.index(fstrim_call) > max(
+        idx for idx, call in enumerate(calls) if call[0] == "spades"
+    )
+    assert calls[-1] == ("keepalive_stop", None)
