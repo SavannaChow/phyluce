@@ -377,6 +377,430 @@ def write_iqtree_script(path, phylip_path, charset_path):
     path.chmod(0o755)
 
 
+def write_executable_script(path, content):
+    with open(path, "w") as handle:
+        handle.write(content)
+    path.chmod(0o755)
+
+
+def write_gene_tree_readme(path, row):
+    lines = [
+        "# ASTRAL gene-tree workflow",
+        "",
+        "Combination / 分析組合:",
+        "",
+        "- trim mode: `{}`".format(row["trim_mode"]),
+        "- dataset: `{}`".format(row["dataset_label"]),
+        "- filter: `{}`".format(row["filter_label"]),
+        "",
+        "## Recommended workflow / 建議流程",
+        "",
+        "Stage 12 gene-tree branch loci alignments",
+        "  -> 01_run_iqtree_gene_trees.sh",
+        "  -> 02_collect_gene_trees.sh",
+        "  -> optional: 03_collapse_low_support_branches.sh",
+        "  -> optional: 04_run_treeshrink.sh",
+        "  -> 05_run_astral.sh",
+        "",
+        "### 01_run_iqtree_gene_trees.sh",
+        "",
+        (
+            "English: Runs IQ-TREE once per locus alignment and writes one "
+            "ML gene tree per locus."
+        ),
+        "",
+        "中文：這一步會對 `alignments/*.fasta` 裡的每個 locus 分別跑 IQ-TREE，",
+        "產生每個 locus 自己的最大概似 gene tree。ASTRAL 不能直接吃 alignment，",
+        "所以這是 ASTRAL 前面必要的第一步。",
+        "",
+        "Input:",
+        "",
+        "- `alignments/*.fasta`",
+        "",
+        "Output:",
+        "",
+        "- `iqtree_gene_trees/<locus>.treefile`",
+        "- `iqtree_gene_trees/<locus>.iqtree`",
+        "- `iqtree_gene_trees/<locus>.log`",
+        "",
+        "### 02_collect_gene_trees.sh",
+        "",
+        (
+            "English: Checks that every alignment has a non-empty `.treefile`, "
+            "then merges them into one ASTRAL input file."
+        ),
+        "",
+        "中文：這一步會檢查每個 locus 是否都有成功產生 `.treefile`。",
+        "如果有缺漏會停止，不會讓 ASTRAL 吃到不完整的 gene-tree set。",
+        "通過檢查後，會把所有 gene trees 合併成一個檔案。",
+        "",
+        "Output:",
+        "",
+        "- `gene_trees/gene_tree_files.txt`",
+        "- `gene_trees/all_gene_trees.tre`",
+        "- `gene_trees/gene_tree_count.txt`",
+        "",
+        "### 03_collapse_low_support_branches.sh",
+        "",
+        (
+            "English: Optional. Collapses branches with very low bootstrap "
+            "support into polytomies."
+        ),
+        "",
+        (
+            "中文：這一步是 optional。它不會刪除 taxa，而是把 gene trees 裡 "
+            "bootstrap"
+        ),
+        "support 很低的分枝收成多分叉 polytomy。目的在於降低不可靠 gene-tree",
+        "branch 對 ASTRAL species tree 的影響。預設門檻是 `BS <= 10`。",
+        "",
+        "Output:",
+        "",
+        "- `gene_trees/all_gene_trees.BS10collapsed.tre`",
+        "",
+        "### 04_run_treeshrink.sh",
+        "",
+        (
+            "English: Optional. Runs TreeShrink to detect unusually long "
+            "branches and remove outlier leaves from gene trees."
+        ),
+        "",
+        "中文：這一步也是 optional，但跟 collapse 不同。TreeShrink 會依據 branch",
+        "length 找 unusually long branches，並移除對應的 outlier leaves/taxa。",
+        "也就是說，某些 gene trees 裡的 taxa 可能會被移除。跑完後一定要先看",
+        "`treeshrink/treeshrink.txt`，確認移除了哪些 taxa，再決定要不要用",
+        "TreeShrink 結果跑 ASTRAL。",
+        "",
+        "Input choices:",
+        "",
+        "- `raw`: `gene_trees/all_gene_trees.tre`",
+        "- `collapsed`: `gene_trees/all_gene_trees.BS10collapsed.tre`",
+        "",
+        "Output:",
+        "",
+        "- `treeshrink/treeshrink.trees`",
+        "- `treeshrink/treeshrink.txt`",
+        "- `treeshrink/treeshrink.log`",
+        "- `treeshrink/input_source.txt`",
+        "",
+        "### 05_run_astral.sh",
+        "",
+        "English: Runs ASTRAL and lets you choose which gene-tree input to use.",
+        "",
+        "中文：這一步會跑 ASTRAL species tree。執行時可以選擇使用哪一種 gene",
+        "trees：`raw`、`collapsed` 或 `treeshrink`。",
+        "",
+        "Input choices:",
+        "",
+        "- `raw`: 原始 IQ-TREE gene trees，沒有額外處理。",
+        "- `collapsed`: 低支持度分枝已 collapse，保留 taxa，但降低低支持分枝",
+        "  影響。",
+        "- `treeshrink`: TreeShrink 過的 gene trees，可能已移除 long-branch",
+        "  outlier taxa。",
+        "",
+        "Non-interactive examples:",
+        "",
+        "```bash",
+        "ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh raw",
+        "ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh collapsed",
+        "ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh treeshrink",
+        "```",
+        "",
+        "ASTRAL output:",
+        "",
+        "- `astral/all_gene_trees.raw.astral.tre`",
+        "- `astral/all_gene_trees.BS10collapsed.astral.tre`",
+        "- `astral/all_gene_trees.treeshrink.astral.tre`",
+        "",
+    ]
+    with open(path, "w") as handle:
+        handle.write("\n".join(lines))
+
+
+def write_gene_tree_analysis_scripts(combo_root):
+    write_executable_script(
+        combo_root / "01_run_iqtree_gene_trees.sh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+IQTREE_BIN="${IQTREE_BIN:-iqtree}"
+JOBS="${JOBS:-72}"
+THREADS_PER_JOB="${THREADS_PER_JOB:-1}"
+MODEL="${MODEL:-MFP}"
+BOOTSTRAPS="${BOOTSTRAPS:-1000}"
+EXTRA_IQTREE_ARGS="${EXTRA_IQTREE_ARGS:-}"
+ALIGNMENT_DIR="alignments"
+OUTDIR="iqtree_gene_trees"
+
+command -v "${IQTREE_BIN}" >/dev/null 2>&1 || {
+  echo "ERROR: IQ-TREE executable not found: ${IQTREE_BIN}" >&2
+  exit 1
+}
+
+if [ ! -d "${ALIGNMENT_DIR}" ]; then
+  echo "ERROR: Missing alignment directory: ${ALIGNMENT_DIR}" >&2
+  exit 1
+fi
+
+ALIGNMENT_COUNT="$(find "${ALIGNMENT_DIR}" -maxdepth 1 -type f -name "*.fasta" | wc -l | tr -d " ")"
+if [ "${ALIGNMENT_COUNT}" -eq 0 ]; then
+  echo "ERROR: No .fasta alignments found under ${ALIGNMENT_DIR}" >&2
+  exit 1
+fi
+
+mkdir -p "${OUTDIR}"
+
+find "${ALIGNMENT_DIR}" -maxdepth 1 -type f -name "*.fasta" -print0 | sort -z | \
+  xargs -0 -n 1 -P "${JOBS}" bash -c '
+    set -euo pipefail
+    aln="$1"
+    outdir="$2"
+    iqtree_bin="$3"
+    threads="$4"
+    model="$5"
+    bootstraps="$6"
+    extra_args="$7"
+    base="$(basename "$aln" .fasta)"
+    prefix="${outdir}/${base}"
+    if [ -s "${prefix}.treefile" ]; then
+      echo "Skipping ${base}; ${prefix}.treefile already exists."
+      exit 0
+    fi
+    "${iqtree_bin}" -s "${aln}" -m "${model}" -B "${bootstraps}" \
+      -T "${threads}" --prefix "${prefix}" ${extra_args}
+  ' bash {} "${OUTDIR}" "${IQTREE_BIN}" "${THREADS_PER_JOB}" \
+    "${MODEL}" "${BOOTSTRAPS}" "${EXTRA_IQTREE_ARGS}"
+""",
+    )
+    write_executable_script(
+        combo_root / "02_collect_gene_trees.sh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+ALIGNMENT_DIR="alignments"
+TREE_DIR="iqtree_gene_trees"
+OUTDIR="gene_trees"
+LIST="${OUTDIR}/gene_tree_files.txt"
+MISSING="${OUTDIR}/missing_gene_trees.txt"
+ALL_TREES="${OUTDIR}/all_gene_trees.tre"
+COUNT_FILE="${OUTDIR}/gene_tree_count.txt"
+
+if [ ! -d "${ALIGNMENT_DIR}" ]; then
+  echo "ERROR: Missing alignment directory: ${ALIGNMENT_DIR}" >&2
+  exit 1
+fi
+if [ ! -d "${TREE_DIR}" ]; then
+  echo "ERROR: Missing IQ-TREE output directory: ${TREE_DIR}" >&2
+  exit 1
+fi
+
+mkdir -p "${OUTDIR}"
+: > "${LIST}"
+: > "${MISSING}"
+
+while IFS= read -r -d "" aln; do
+  base="$(basename "${aln}" .fasta)"
+  tree="${TREE_DIR}/${base}.treefile"
+  if [ -s "${tree}" ]; then
+    printf "%s\\n" "${tree}" >> "${LIST}"
+  else
+    printf "%s\\n" "${base}" >> "${MISSING}"
+  fi
+done < <(find "${ALIGNMENT_DIR}" -maxdepth 1 -type f -name "*.fasta" -print0 | sort -z)
+
+if [ -s "${MISSING}" ]; then
+  echo "ERROR: Missing non-empty .treefile outputs for these loci:" >&2
+  cat "${MISSING}" >&2
+  exit 1
+fi
+
+TREE_COUNT="$(wc -l < "${LIST}" | tr -d " ")"
+if [ "${TREE_COUNT}" -eq 0 ]; then
+  echo "ERROR: No gene trees found." >&2
+  exit 1
+fi
+
+: > "${ALL_TREES}"
+while IFS= read -r tree; do
+  cat "${tree}" >> "${ALL_TREES}"
+  printf "\\n" >> "${ALL_TREES}"
+done < "${LIST}"
+
+printf "gene_trees\\t%s\\n" "${TREE_COUNT}" > "${COUNT_FILE}"
+echo "Wrote ${TREE_COUNT} gene trees to ${ALL_TREES}"
+""",
+    )
+    write_executable_script(
+        combo_root / "03_collapse_low_support_branches.sh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+NW_ED_BIN="${NW_ED_BIN:-nw_ed}"
+SUPPORT_THRESHOLD="${SUPPORT_THRESHOLD:-10}"
+INPUT="gene_trees/all_gene_trees.tre"
+OUTPUT="gene_trees/all_gene_trees.BS10collapsed.tre"
+TMP_OUTPUT="${OUTPUT}.tmp"
+
+command -v "${NW_ED_BIN}" >/dev/null 2>&1 || {
+  echo "ERROR: newick-utils nw_ed executable not found: ${NW_ED_BIN}" >&2
+  exit 1
+}
+if [ ! -s "${INPUT}" ]; then
+  echo "ERROR: Missing input gene trees: ${INPUT}" >&2
+  echo "Run 02_collect_gene_trees.sh first." >&2
+  exit 1
+fi
+
+"${NW_ED_BIN}" "${INPUT}" "i & b<=${SUPPORT_THRESHOLD}" o > "${TMP_OUTPUT}"
+if [ ! -s "${TMP_OUTPUT}" ]; then
+  echo "ERROR: Collapse step produced an empty file: ${TMP_OUTPUT}" >&2
+  exit 1
+fi
+mv "${TMP_OUTPUT}" "${OUTPUT}"
+echo "Wrote low-support-collapsed gene trees to ${OUTPUT}"
+""",
+    )
+    write_executable_script(
+        combo_root / "04_run_treeshrink.sh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+TREESHRINK_BIN="${TREESHRINK_BIN:-run_treeshrink.py}"
+MODE="${1:-}"
+
+if [ -z "${MODE}" ]; then
+  echo "Choose TreeShrink input:"
+  echo "1. raw       - gene_trees/all_gene_trees.tre"
+  echo "2. collapsed - gene_trees/all_gene_trees.BS10collapsed.tre"
+  read -r -p "Enter choice [1]: " choice
+  case "${choice:-1}" in
+    1|raw) MODE="raw" ;;
+    2|collapsed) MODE="collapsed" ;;
+    *) echo "ERROR: Invalid choice: ${choice}" >&2; exit 1 ;;
+  esac
+fi
+
+case "${MODE}" in
+  raw)
+    INPUT="gene_trees/all_gene_trees.tre"
+    ;;
+  collapsed)
+    INPUT="gene_trees/all_gene_trees.BS10collapsed.tre"
+    ;;
+  *)
+    echo "ERROR: Expected raw or collapsed, got: ${MODE}" >&2
+    exit 1
+    ;;
+esac
+
+command -v "${TREESHRINK_BIN}" >/dev/null 2>&1 || {
+  echo "ERROR: TreeShrink executable not found: ${TREESHRINK_BIN}" >&2
+  exit 1
+}
+if [ ! -s "${INPUT}" ]; then
+  echo "ERROR: Missing TreeShrink input: ${INPUT}" >&2
+  exit 1
+fi
+
+if [ -d "treeshrink" ]; then
+  STAMP="$(date +%Y%m%d_%H%M%S)"
+  mv "treeshrink" "treeshrink.previous_${STAMP}"
+fi
+
+"${TREESHRINK_BIN}" -t "${INPUT}" -o "treeshrink" -O "treeshrink"
+if [ ! -s "treeshrink/treeshrink.trees" ]; then
+  echo "ERROR: Expected TreeShrink output not found: treeshrink/treeshrink.trees" >&2
+  exit 1
+fi
+printf "mode\\t%s\\ninput\\t%s\\n" "${MODE}" "${INPUT}" > "treeshrink/input_source.txt"
+echo "Wrote TreeShrink-filtered gene trees to treeshrink/treeshrink.trees"
+echo "Review removed leaves in treeshrink/treeshrink.txt before using this for ASTRAL."
+""",
+    )
+    write_executable_script(
+        combo_root / "05_run_astral.sh",
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
+
+ASTRAL_JAR="${ASTRAL_JAR:-}"
+JAVA_BIN="${JAVA_BIN:-java}"
+MODE="${1:-}"
+ASTRAL_ARGS="${ASTRAL_ARGS:-}"
+
+if [ -z "${MODE}" ]; then
+  echo "Choose gene tree input for ASTRAL:"
+  echo "1. raw        - original IQ-TREE gene trees"
+  echo "2. collapsed  - low-support branches collapsed"
+  echo "3. treeshrink - TreeShrink-filtered gene trees"
+  read -r -p "Enter choice [1]: " choice
+  case "${choice:-1}" in
+    1|raw) MODE="raw" ;;
+    2|collapsed) MODE="collapsed" ;;
+    3|treeshrink) MODE="treeshrink" ;;
+    *) echo "ERROR: Invalid choice: ${choice}" >&2; exit 1 ;;
+  esac
+fi
+
+case "${MODE}" in
+  raw)
+    INPUT="gene_trees/all_gene_trees.tre"
+    LABEL="raw"
+    ;;
+  collapsed)
+    INPUT="gene_trees/all_gene_trees.BS10collapsed.tre"
+    LABEL="BS10collapsed"
+    ;;
+  treeshrink)
+    INPUT="treeshrink/treeshrink.trees"
+    LABEL="treeshrink"
+    ;;
+  *)
+    echo "ERROR: Expected raw, collapsed, or treeshrink, got: ${MODE}" >&2
+    exit 1
+    ;;
+esac
+
+command -v "${JAVA_BIN}" >/dev/null 2>&1 || {
+  echo "ERROR: Java executable not found: ${JAVA_BIN}" >&2
+  exit 1
+}
+if [ -z "${ASTRAL_JAR}" ] || [ ! -f "${ASTRAL_JAR}" ]; then
+  echo "ERROR: Set ASTRAL_JAR to the ASTRAL jar path before running." >&2
+  echo "Example: ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh ${MODE}" >&2
+  exit 1
+fi
+if [ ! -s "${INPUT}" ]; then
+  echo "ERROR: Missing ASTRAL input: ${INPUT}" >&2
+  exit 1
+fi
+
+mkdir -p "astral"
+OUTPUT="astral/all_gene_trees.${LABEL}.astral.tre"
+LOG="astral/all_gene_trees.${LABEL}.astral.log"
+
+"${JAVA_BIN}" -jar "${ASTRAL_JAR}" -i "${INPUT}" -o "${OUTPUT}" ${ASTRAL_ARGS} 2> "${LOG}"
+
+echo "Wrote ASTRAL tree to ${OUTPUT}"
+echo "Wrote ASTRAL log to ${LOG}"
+""",
+    )
+
+
 def concatenate_alignments(alignments_dir, output_root, output_prefix):
     files = sorted(Path(alignments_dir).glob("*.fasta"))
     if not files:
@@ -535,6 +959,12 @@ def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_
         "charset_nexus_file": concat_result["charset_nexus_file"],
         "partition_file": concat_result["partition_file"],
         "iqtree_script": concat_result["iqtree_script"],
+        "analysis_readme": "",
+        "gene_tree_iqtree_script": "",
+        "gene_tree_collect_script": "",
+        "gene_tree_collapse_script": "",
+        "gene_tree_treeshrink_script": "",
+        "astral_script": "",
         "analysis_output_dir": concat_result["analysis_output_dir"],
         "raxml_iqtree_dir": concat_result["raxml_iqtree_dir"],
         "mrbayes_dir": concat_result["mrbayes_dir"],
@@ -546,6 +976,9 @@ def process_gene_tree_branch(row, fasta_files, output_root):
     combo_root = branch_combo_root(output_root, "gene-tree", row)
     out_alignments = combo_root / "alignments"
     out_alignments.mkdir(parents=True, exist_ok=True)
+    readme_path = combo_root / "README_ASTRAL.md"
+    write_gene_tree_readme(readme_path, row)
+    write_gene_tree_analysis_scripts(combo_root)
     summary_rows = []
     for fasta_path in fasta_files:
         output_path = out_alignments / fasta_path.name
@@ -589,6 +1022,14 @@ def process_gene_tree_branch(row, fasta_files, output_root):
         "charset_nexus_file": "",
         "partition_file": "",
         "iqtree_script": "",
+        "analysis_readme": str(readme_path),
+        "gene_tree_iqtree_script": str(combo_root / "01_run_iqtree_gene_trees.sh"),
+        "gene_tree_collect_script": str(combo_root / "02_collect_gene_trees.sh"),
+        "gene_tree_collapse_script": str(
+            combo_root / "03_collapse_low_support_branches.sh"
+        ),
+        "gene_tree_treeshrink_script": str(combo_root / "04_run_treeshrink.sh"),
+        "astral_script": str(combo_root / "05_run_astral.sh"),
         "analysis_output_dir": "",
         "raxml_iqtree_dir": "",
         "mrbayes_dir": "",
@@ -644,6 +1085,12 @@ def write_manifest(path, rows):
         "charset_nexus_file",
         "partition_file",
         "iqtree_script",
+        "analysis_readme",
+        "gene_tree_iqtree_script",
+        "gene_tree_collect_script",
+        "gene_tree_collapse_script",
+        "gene_tree_treeshrink_script",
+        "astral_script",
         "analysis_output_dir",
         "raxml_iqtree_dir",
         "mrbayes_dir",
