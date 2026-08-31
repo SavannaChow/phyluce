@@ -70,6 +70,24 @@ def test_stage1_rejects_unrelated_nonempty_project_dir(tmp_path):
         )
 
 
+def test_interactive_stage_choice_accepts_ranges():
+    launcher = load_launcher()
+
+    assert launcher.parse_interactive_stage_choice("8-12") == (8, 12)
+    assert launcher.parse_interactive_stage_choice("8 - 10") == (8, 10)
+    assert launcher.parse_interactive_stage_choice("7") == (7, 7)
+    assert launcher.parse_interactive_stage_choice("f") == (1, 12)
+
+
+def test_interactive_stage_choice_rejects_invalid_ranges():
+    launcher = load_launcher()
+
+    with pytest.raises(ValueError, match="Start stage must be <= end stage"):
+        launcher.parse_interactive_stage_choice("12-8")
+    with pytest.raises(ValueError, match="Use stages"):
+        launcher.parse_interactive_stage_choice("8-13")
+
+
 def test_fastp_skips_completed_sample(tmp_path):
     launcher = load_launcher()
     messages = []

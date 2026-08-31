@@ -532,13 +532,32 @@ def choose_action_interactively():
     for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f or 1-12): ").strip().lower()
-        if answer in INTERACTIVE_ACTIONS:
-            key = INTERACTIVE_ACTIONS[answer][0]
-            if key == "full":
-                return 1, 12
-            return int(key.replace("stage", "")), int(key.replace("stage", ""))
-        print("Invalid choice.")
+        answer = input("Enter choice (f, 1-12, or a range like 8-12): ").strip().lower()
+        try:
+            return parse_interactive_stage_choice(answer)
+        except ValueError as exc:
+            print(str(exc))
+
+
+def parse_interactive_stage_choice(answer):
+    if answer in INTERACTIVE_ACTIONS:
+        key = INTERACTIVE_ACTIONS[answer][0]
+        if key == "full":
+            return 1, MAX_STAGE
+        stage = int(key.replace("stage", ""))
+        return stage, stage
+
+    match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", answer)
+    if match:
+        start_stage = int(match.group(1))
+        end_stage = int(match.group(2))
+        if start_stage < 1 or end_stage > MAX_STAGE:
+            raise ValueError("Invalid range. Use stages 1-{}.".format(MAX_STAGE))
+        if start_stage > end_stage:
+            raise ValueError("Invalid range. Start stage must be <= end stage.")
+        return start_stage, end_stage
+
+    raise ValueError("Invalid choice.")
 
 
 def resolve_raw_dir(current_dir, raw_dir_arg):
