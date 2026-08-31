@@ -9,6 +9,7 @@ from pathlib import Path
 
 DATASET_CHOICES = ("complete", "incomplete")
 BRANCH_CHOICES = ("supermatrix", "gene-tree")
+PROJECT_INFO_NAME = "project.info"
 
 
 def get_args():
@@ -354,7 +355,55 @@ def write_charset_nexus(path, partitions):
         handle.write("END;\n")
 
 
-def write_iqtree_script(path, phylip_path, charset_path):
+def read_project_id_from_info(path):
+    info_path = Path(path) / PROJECT_INFO_NAME
+    if not info_path.is_file():
+        return None
+    with open(info_path) as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if not line or "\t" not in line:
+                continue
+            key, value = line.split("\t", 1)
+            if key == "project_id" and value:
+                return value
+    return None
+
+
+def project_prefix_from_project_info(*paths):
+    candidates = []
+    for path in paths:
+        current = Path(path).resolve()
+        candidates.append(current)
+        candidates.extend(current.parents)
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        project_id = read_project_id_from_info(candidate)
+        if project_id:
+            return project_id
+    return None
+
+
+def project_prefix_from_aggregated_loci(path):
+    name = Path(path).name
+    suffix = ".filtered.loci.tsv"
+    if name.endswith(suffix):
+        return name[: -len(suffix)]
+    return Path(name).stem
+
+
+def resolve_project_prefix(input_dir, output_dir, aggregated_loci):
+    return (
+        project_prefix_from_project_info(output_dir, input_dir, aggregated_loci)
+        or project_prefix_from_aggregated_loci(aggregated_loci)
+    )
+
+
+def write_iqtree_script(path, phylip_path, charset_path, project_prefix):
+    iqtree_prefix = "{}_{}".format(project_prefix, phylip_path.stem)
     command = [
         "iqtree",
         "-s",
@@ -369,6 +418,8 @@ def write_iqtree_script(path, phylip_path, charset_path):
         "AUTO",
         "-B",
         "1000",
+        "--prefix",
+        "./{}".format(iqtree_prefix),
     ]
     with open(path, "w") as handle:
         handle.write("#!/usr/bin/env bash\n")
@@ -383,7 +434,7 @@ def write_executable_script(path, content):
     path.chmod(0o755)
 
 
-def write_gene_tree_readme(path, row):
+def write_gene_tree_readme(path, row, project_prefix):
     lines = [
         "# ASTRAL gene-tree workflow",
         "",
@@ -508,16 +559,16 @@ def write_gene_tree_readme(path, row):
         "",
         "ASTRAL output:",
         "",
-        "- `astral/all_gene_trees.raw.astral.tre`",
-        "- `astral/all_gene_trees.BS10collapsed.astral.tre`",
-        "- `astral/all_gene_trees.treeshrink.astral.tre`",
+        "- `astral/{}_all_gene_trees.raw.astral.tre`".format(project_prefix),
+        "- `astral/{}_all_gene_trees.BS10collapsed.astral.tre`".format(project_prefix),
+        "- `astral/{}_all_gene_trees.treeshrink.astral.tre`".format(project_prefix),
         "",
     ]
     with open(path, "w") as handle:
         handle.write("\n".join(lines))
 
 
-def write_gene_tree_analysis_scripts(combo_root):
+def write_gene_tree_analysis_scripts(combo_root, project_prefix):
     write_executable_script(
         combo_root / "01_run_iqtree_gene_trees.sh",
         """#!/usr/bin/env bash
@@ -790,18 +841,19 @@ if [ ! -s "${INPUT}" ]; then
 fi
 
 mkdir -p "astral"
-OUTPUT="astral/all_gene_trees.${LABEL}.astral.tre"
-LOG="astral/all_gene_trees.${LABEL}.astral.log"
+PROJECT_PREFIX="__PROJECT_PREFIX__"
+OUTPUT="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.tre"
+LOG="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.log"
 
 "${JAVA_BIN}" -jar "${ASTRAL_JAR}" -i "${INPUT}" -o "${OUTPUT}" ${ASTRAL_ARGS} 2> "${LOG}"
 
 echo "Wrote ASTRAL tree to ${OUTPUT}"
 echo "Wrote ASTRAL log to ${LOG}"
-""",
+""".replace("__PROJECT_PREFIX__", project_prefix),
     )
 
 
-def concatenate_alignments(alignments_dir, output_root, output_prefix):
+def concatenate_alignments(alignments_dir, output_root, output_prefix, project_prefix):
     files = sorted(Path(alignments_dir).glob("*.fasta"))
     if not files:
         raise RuntimeError("No alignment FASTA files found under {}".format(alignments_dir))
@@ -867,7 +919,7 @@ def concatenate_alignments(alignments_dir, output_root, output_prefix):
     with open(partition_plain_out, "w") as handle:
         for row in partitions:
             handle.write("DNA, {} = {}-{}\n".format(row["locus"], row["start"], row["end"]))
-    write_iqtree_script(iqtree_script_out, phylip_out, charset_nexus_out)
+    write_iqtree_script(iqtree_script_out, phylip_out, charset_nexus_out, project_prefix)
 
     return {
         "loci_concatenated": len(files),
@@ -911,7 +963,7 @@ def build_base_row(row, branch, fasta_path, output_path):
     }
 
 
-def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_character):
+def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_character, project_prefix):
     combo_root = branch_combo_root(output_root, "supermatrix", row)
     out_alignments = combo_root / "alignments"
     summary_rows = []
@@ -933,6 +985,7 @@ def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_
         out_alignments,
         combo_root / "analysis_ready",
         concat_prefix,
+        project_prefix,
     )
     summary_path = combo_root / "branch_summary.tsv"
     write_branch_summary(summary_path, summary_rows)
@@ -972,13 +1025,13 @@ def process_supermatrix_branch(row, fasta_files, output_root, all_taxa, missing_
     return manifest_row, summary_rows
 
 
-def process_gene_tree_branch(row, fasta_files, output_root):
+def process_gene_tree_branch(row, fasta_files, output_root, project_prefix):
     combo_root = branch_combo_root(output_root, "gene-tree", row)
     out_alignments = combo_root / "alignments"
     out_alignments.mkdir(parents=True, exist_ok=True)
     readme_path = combo_root / "README_ASTRAL.md"
-    write_gene_tree_readme(readme_path, row)
-    write_gene_tree_analysis_scripts(combo_root)
+    write_gene_tree_readme(readme_path, row, project_prefix)
+    write_gene_tree_analysis_scripts(combo_root, project_prefix)
     summary_rows = []
     for fasta_path in fasta_files:
         output_path = out_alignments / fasta_path.name
@@ -1108,6 +1161,7 @@ def main():
     requested_datasets, requested_threshold_groups = parse_threshold_groups(args.threshold_groups)
     requested_filter_labels = parse_filter_labels(args.filter_labels)
     stage11_rows = read_stage11_manifest(args.input_dir)
+    project_prefix = resolve_project_prefix(args.input_dir, args.output_dir, args.aggregated_loci)
     selected_rows = select_stage11_rows(
         stage11_rows,
         requested_datasets,
@@ -1135,11 +1189,11 @@ def main():
             )
             if branch == "supermatrix":
                 manifest_row, summary_rows = process_supermatrix_branch(
-                    row, fasta_files, output_root, all_taxa, args.missing_character
+                    row, fasta_files, output_root, all_taxa, args.missing_character, project_prefix
                 )
             else:
                 manifest_row, summary_rows = process_gene_tree_branch(
-                    row, fasta_files, output_root
+                    row, fasta_files, output_root, project_prefix
                 )
             manifest_rows.append(manifest_row)
             all_rows.extend(summary_rows)

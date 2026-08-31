@@ -14,7 +14,12 @@ def write_locus(path, records):
             handle.write(">{}\n{}\n".format(name, seq))
 
 
+def write_project_info(path, project_id):
+    path.write_text("project_id\t{}\n".format(project_id))
+
+
 def test_stage12_writes_named_iqtree_script_for_supermatrix(tmp_path):
+    write_project_info(tmp_path / "project.info", "Acropora")
     stage11_combo = tmp_path / "stage11" / "edge" / "incomplete" / "min_taxa_050"
     alignments = stage11_combo / "alignments"
     alignments.mkdir(parents=True)
@@ -53,7 +58,7 @@ def test_stage12_writes_named_iqtree_script_for_supermatrix(tmp_path):
             }
         )
 
-    aggregated = tmp_path / "aggregated.tsv"
+    aggregated = tmp_path / "not_the_project_name.filtered.loci.tsv"
     with open(aggregated, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["sample_id"], delimiter="\t")
         writer.writeheader()
@@ -96,7 +101,8 @@ def test_stage12_writes_named_iqtree_script_for_supermatrix(tmp_path):
         (
             "iqtree -s ./edge-incomplete-min_taxa_050.phylip "
             "-p ./edge-incomplete-min_taxa_050.charsets.nexus "
-            "-m MFP+MERGE -rcluster 10 -T AUTO -B 1000"
+            "-m MFP+MERGE -rcluster 10 -T AUTO -B 1000 "
+            "--prefix ./Acropora_edge-incomplete-min_taxa_050"
         ),
     ]
 
@@ -106,6 +112,7 @@ def test_stage12_writes_named_iqtree_script_for_supermatrix(tmp_path):
 
 
 def test_stage12_writes_astral_workflow_for_gene_tree_branch(tmp_path):
+    write_project_info(tmp_path / "project.info", "Acropora")
     stage11_combo = tmp_path / "stage11" / "internal" / "incomplete" / "min_taxa_075"
     alignments = stage11_combo / "alignments"
     alignments.mkdir(parents=True)
@@ -144,7 +151,7 @@ def test_stage12_writes_astral_workflow_for_gene_tree_branch(tmp_path):
             }
         )
 
-    aggregated = tmp_path / "aggregated.tsv"
+    aggregated = tmp_path / "not_the_project_name.filtered.loci.tsv"
     with open(aggregated, "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["sample_id"], delimiter="\t")
         writer.writeheader()
@@ -197,6 +204,9 @@ def test_stage12_writes_astral_workflow_for_gene_tree_branch(tmp_path):
     assert "1. raw" in astral_script
     assert "2. collapsed" in astral_script
     assert "3. treeshrink" in astral_script
+    assert 'OUTPUT="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.tre"' in astral_script
+    assert 'PROJECT_PREFIX="Acropora"' in astral_script
+    assert "astral/Acropora_all_gene_trees.raw.astral.tre" in readme
 
     tree_dir = combo / "iqtree_gene_trees"
     tree_dir.mkdir()
