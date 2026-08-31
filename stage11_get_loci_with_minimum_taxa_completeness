@@ -251,6 +251,8 @@ def copy_alignments_for_branch(reference_dir, output_dir, branch, completeness_t
     filter_label = completeness_label(completeness_threshold)
     combo_root = output_combo_root(output_dir, branch, filter_label)
     out_alignments = combo_root / "alignments"
+    if out_alignments.exists():
+        shutil.rmtree(out_alignments)
     out_alignments.mkdir(parents=True, exist_ok=True)
     summary_rows = []
     kept = 0

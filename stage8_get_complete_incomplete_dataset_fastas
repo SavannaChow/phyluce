@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import shutil
 from collections import OrderedDict, defaultdict
 from pathlib import Path
 
@@ -194,6 +195,8 @@ def materialize_dataset(dataset_label, rows, sequence_index, output_root):
 
     dataset_root = Path(output_root).resolve() / dataset_label
     loci_root = dataset_root / "loci"
+    if loci_root.exists():
+        shutil.rmtree(loci_root)
     loci_root.mkdir(parents=True, exist_ok=True)
     monolithic_path = dataset_root / "{}.fasta".format(dataset_label)
     summary_path = dataset_root / "locus_fasta_summary.tsv"

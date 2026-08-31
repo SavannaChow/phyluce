@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -165,3 +166,46 @@ def test_parallel_spades_runs_fstrim_after_concurrent_batch(monkeypatch, tmp_pat
         idx for idx, call in enumerate(calls) if call[0] == "spades"
     )
     assert calls[-1] == ("keepalive_stop", None)
+
+
+def test_stage7_rebuilds_existing_aggregate_outputs(monkeypatch, tmp_path):
+    launcher = load_launcher()
+    messages = []
+    commands = []
+
+    class Logger:
+        def info(self, message):
+            messages.append(message)
+
+    def fake_stream_process(command, logger, log_path=None, **kwargs):
+        commands.append((command, log_path))
+
+    monkeypatch.setattr(launcher, "stream_process", fake_stream_process)
+
+    aggregate_root = tmp_path / "07_Aggregated_loci"
+    aggregate_root.mkdir()
+    (aggregate_root / "Acropora.uce.sqlite").write_text("stale stage 7\n")
+
+    launcher.run_aggregate(
+        tmp_path / "stage7_get_complete_incomplete_dataset_definitions",
+        tmp_path / "05_Filtering_uce_hits_trace",
+        aggregate_root,
+        "Acropora",
+        Logger(),
+        tmp_path / "00_Log",
+    )
+
+    assert messages == [
+        "Existing Stage 7 aggregate found; rebuilding from filtered per-sample loci."
+    ]
+    assert len(commands) == 1
+    command, log_path = commands[0]
+    assert command[:2] == [
+        sys.executable,
+        str(tmp_path / "stage7_get_complete_incomplete_dataset_definitions"),
+    ]
+    assert "--input-dir" in command
+    assert str(tmp_path / "05_Filtering_uce_hits_trace") in command
+    assert "--output-dir" in command
+    assert str(aggregate_root) in command
+    assert log_path == tmp_path / "00_Log" / "aggregate_loci.log"

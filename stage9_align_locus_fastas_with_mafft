@@ -3,6 +3,7 @@
 import argparse
 import csv
 import os
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import OrderedDict
@@ -273,6 +274,9 @@ def align_dataset(input_dir, output_dir, dataset_label, jobs, mafft_threads, mat
     dataset_output = Path(output_dir).resolve() / dataset_label
     prefiltered_dir = dataset_output / "prefiltered_fastas"
     alignments_dir = dataset_output / "alignments"
+    for path in (prefiltered_dir, alignments_dir):
+        if path.exists():
+            shutil.rmtree(path)
     alignments_dir.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
