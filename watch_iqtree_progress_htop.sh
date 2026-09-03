@@ -20,7 +20,7 @@ BOLD=$'\033[1m'
 DIM=$'\033[2m'
 RED=$'\033[31m'
 GREEN=$'\033[32m'
-YELLOW=$'\033[33m'
+YELLOW=$'\033[37m'
 BLUE=$'\033[34m'
 MAGENTA=$'\033[35m'
 CYAN=$'\033[36m'
@@ -28,7 +28,19 @@ WHITE=$'\033[37m'
 
 # 隱藏游標，離開時恢復
 printf '\033[?25l'
-trap 'printf "\033[?25h\033[0m\n"' EXIT INT TERM
+
+cleanup() {
+    printf '\033[?25h\033[0m\n'
+}
+
+handle_signal() {
+    cleanup
+    trap - EXIT INT TERM
+    exit 0
+}
+
+trap cleanup EXIT
+trap handle_signal INT TERM
 
 format_seconds() {
     local s="${1:-0}"
