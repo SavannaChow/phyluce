@@ -612,11 +612,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 IQTREE_BIN="${IQTREE_BIN:-iqtree}"
-JOBS="${JOBS:-72}"
-THREADS_PER_JOB="${THREADS_PER_JOB:-1}"
-MODEL="${MODEL:-MFP}"
-BOOTSTRAPS="${BOOTSTRAPS:-1000}"
-EXTRA_IQTREE_ARGS="${EXTRA_IQTREE_ARGS:-}"
+JOBS="${1:-${JOBS:-}}"
+THREADS_PER_JOB="${2:-${THREADS_PER_JOB:-}}"
+MODEL="${3:-${MODEL:-}}"
+BOOTSTRAPS="${4:-${BOOTSTRAPS:-}}"
+EXTRA_IQTREE_ARGS="${5:-${EXTRA_IQTREE_ARGS:-}}"
+if [[ -t 0 ]]; then
+  read -r -p "Concurrent IQ-TREE jobs [${JOBS:-72}]: " value; JOBS="${value:-${JOBS:-72}}"
+  read -r -p "Threads per job [${THREADS_PER_JOB:-1}]: " value; THREADS_PER_JOB="${value:-${THREADS_PER_JOB:-1}}"
+  read -r -p "IQ-TREE model [${MODEL:-MFP}]: " value; MODEL="${value:-${MODEL:-MFP}}"
+  read -r -p "Ultrafast bootstrap replicates [${BOOTSTRAPS:-1000}]: " value; BOOTSTRAPS="${value:-${BOOTSTRAPS:-1000}}"
+  read -r -p "Additional IQ-TREE arguments [${EXTRA_IQTREE_ARGS}]: " value; EXTRA_IQTREE_ARGS="${value:-${EXTRA_IQTREE_ARGS}}"
+else
+  JOBS="${JOBS:-72}"; THREADS_PER_JOB="${THREADS_PER_JOB:-1}"
+  MODEL="${MODEL:-MFP}"; BOOTSTRAPS="${BOOTSTRAPS:-1000}"
+fi
+echo "Using JOBS=${JOBS}, THREADS_PER_JOB=${THREADS_PER_JOB} (total threads: $((JOBS * THREADS_PER_JOB))), MODEL=${MODEL}, BOOTSTRAPS=${BOOTSTRAPS}"
 ALIGNMENT_DIR="alignments"
 OUTDIR="iqtree_gene_trees"
 
@@ -736,7 +747,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 NW_ED_BIN="${NW_ED_BIN:-nw_ed}"
+SUPPORT_THRESHOLD="${1:-${SUPPORT_THRESHOLD:-}}"
+if [[ -z "${SUPPORT_THRESHOLD}" && -t 0 ]]; then
+  read -r -p "Collapse support threshold [10]: " value
+  SUPPORT_THRESHOLD="${value:-10}"
+fi
 SUPPORT_THRESHOLD="${SUPPORT_THRESHOLD:-10}"
+echo "Using support threshold: ${SUPPORT_THRESHOLD}"
 INPUT="gene_trees/all_gene_trees.tre"
 OUTPUT="gene_trees/all_gene_trees.BS10collapsed.tre"
 TMP_OUTPUT="${OUTPUT}.tmp"
@@ -770,6 +787,7 @@ cd "${SCRIPT_DIR}"
 
 TREESHRINK_BIN="${TREESHRINK_BIN:-run_treeshrink.py}"
 MODE="${1:-}"
+TREESHRINK_ARGS="${TREESHRINK_ARGS:-}"
 
 if [ -z "${MODE}" ]; then
   echo "Choose TreeShrink input:"
@@ -810,7 +828,7 @@ if [ -d "treeshrink" ]; then
   mv "treeshrink" "treeshrink.previous_${STAMP}"
 fi
 
-"${TREESHRINK_BIN}" -t "${INPUT}" -o "treeshrink" -O "treeshrink"
+"${TREESHRINK_BIN}" -t "${INPUT}" -o "treeshrink" -O "treeshrink" ${TREESHRINK_ARGS}
 if [ ! -s "treeshrink/treeshrink.trees" ]; then
   echo "ERROR: Expected TreeShrink output not found: treeshrink/treeshrink.trees" >&2
   exit 1
@@ -832,6 +850,8 @@ ASTRAL_JAR="${ASTRAL_JAR:-}"
 JAVA_BIN="${JAVA_BIN:-java}"
 MODE="${1:-}"
 ASTRAL_ARGS="${ASTRAL_ARGS:-}"
+JAVA_MEMORY="${JAVA_MEMORY:-}"
+ASTRAL_THREADS="${ASTRAL_THREADS:-}"
 
 if [ -z "${MODE}" ]; then
   echo "Choose gene tree input for ASTRAL:"
@@ -846,6 +866,19 @@ if [ -z "${MODE}" ]; then
     *) echo "ERROR: Invalid choice: ${choice}" >&2; exit 1 ;;
   esac
 fi
+
+if [[ -t 0 ]]; then
+  read -r -p "Java maximum memory [${JAVA_MEMORY:-8G}]: " value
+  JAVA_MEMORY="${value:-${JAVA_MEMORY:-8G}}"
+  read -r -p "ASTRAL threads [${ASTRAL_THREADS:-1}]: " value
+  ASTRAL_THREADS="${value:-${ASTRAL_THREADS:-1}}"
+  read -r -p "Additional ASTRAL arguments [${ASTRAL_ARGS}]: " value
+  ASTRAL_ARGS="${value:-${ASTRAL_ARGS}}"
+else
+  JAVA_MEMORY="${JAVA_MEMORY:-8G}"
+  ASTRAL_THREADS="${ASTRAL_THREADS:-1}"
+fi
+echo "Using Java memory: ${JAVA_MEMORY}; ASTRAL threads: ${ASTRAL_THREADS}"
 
 case "${MODE}" in
   raw)
@@ -885,7 +918,8 @@ PROJECT_PREFIX="__PROJECT_PREFIX__"
 OUTPUT="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.tre"
 LOG="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.log"
 
-"${JAVA_BIN}" -jar "${ASTRAL_JAR}" -i "${INPUT}" -o "${OUTPUT}" ${ASTRAL_ARGS} 2> "${LOG}"
+JAVA_OPTS=("-Xmx${JAVA_MEMORY}")
+"${JAVA_BIN}" "${JAVA_OPTS[@]}" -jar "${ASTRAL_JAR}" -i "${INPUT}" -o "${OUTPUT}" -t "${ASTRAL_THREADS}" ${ASTRAL_ARGS} 2> "${LOG}"
 
 echo "Wrote ASTRAL tree to ${OUTPUT}"
 echo "Wrote ASTRAL log to ${LOG}"
