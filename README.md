@@ -16,6 +16,9 @@ As it stands, the [phyluce][1] package is useful for analyzing both data collect
 
 Please see the [Documentation][2] for additional information on installing and using [phyluce][1]
 
+For the custom launcher's independent sample-subset workflow, see
+[Stage 13 instructions (中文)](docs/stage13-subsets.md).
+
 License
 -------
 

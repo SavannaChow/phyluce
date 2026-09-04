@@ -56,6 +56,7 @@ INTERACTIVE_ACTIONS = {
     "10": ("stage10", "Run 10: Trim alignments with edge/internal methods"),
     "11": ("stage11", "Run 11: Get loci with minimum taxa completeness"),
     "12": ("stage12", "Run 12: Prepare supermatrix and gene-tree datasets"),
+    "13": ("stage13", "Run 13: Create or run independent sample subsets"),
 }
 
 
@@ -327,17 +328,21 @@ def get_args():
     parser.add_argument(
         "--start-stage",
         type=int,
-        choices=range(1, 13),
+        choices=range(1, 14),
         default=None,
         help="Stage number to start from. 1=Trim, 2=SPAdes, 3=Alignment, 4=Prepare hits, 5=Filter, 6=Extract FASTA, 7=Aggregate loci and define datasets, 8=Materialize dataset FASTAs, 9=Align dataset FASTAs, 10=Apply trim strategy, 11=Filter locus alignments by taxa completeness, 12=Dispatch supermatrix/gene-tree branches.",
     )
     parser.add_argument(
         "--end-stage",
         type=int,
-        choices=range(1, 13),
+        choices=range(1, 14),
         default=None,
-        help="Stage number to end at.",
+        help="Stage number to end at. Select 13 alone for independent sample subsets.",
     )
+    parser.add_argument("--subset-action", choices=["create", "run", "copy", "list"],
+                        help="Stage 13 action; full pipeline still ends at stage 12.")
+    parser.add_argument("--subset-name", help="Required user-chosen name for a new subset.")
+    parser.add_argument("--subset-dir", help="Existing subset folder name or path for run/copy.")
     return parser.parse_args()
 
 
@@ -529,10 +534,10 @@ def choose_action_interactively():
         )
     print("Choose workflow action:")
     print("  f. {}".format(INTERACTIVE_ACTIONS["f"][1]))
-    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"):
+    for key in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"):
         print("  {}. {}".format(key, INTERACTIVE_ACTIONS[key][1]))
     while True:
-        answer = input("Enter choice (f, 1-12, or a range like 8-12): ").strip().lower()
+        answer = input("Enter choice (f, 1-12, 13 for subsets, or a range like 8-12): ").strip().lower()
         try:
             return parse_interactive_stage_choice(answer)
         except ValueError as exc:
@@ -2818,6 +2823,14 @@ def print_dry_run_plan(
 def main():
     args = get_args()
     args.start_stage, args.end_stage = determine_stage_range(args)
+    if 13 in (args.start_stage, args.end_stage):
+        if (args.start_stage, args.end_stage) != (13, 13):
+            raise RuntimeError("Stage 13 must be selected separately from stages 1-12.")
+        from phyluce.subsets import manage_subsets
+        manage_subsets(args, sys.modules[__name__])
+        return
+    if args.subset_action or args.subset_name or args.subset_dir:
+        raise RuntimeError("Subset options require --start-stage 13.")
     if args.start_stage > args.end_stage:
         raise RuntimeError("--start-stage cannot be greater than --end-stage.")
     selected_stages = set(range(args.start_stage, args.end_stage + 1))

@@ -56,6 +56,7 @@ def get_args():
         default="all_samples",
         help="Filename prefix for aggregate outputs.",
     )
+    parser.add_argument("--samples-file", help="Optional sample IDs to retain, one per line.")
     return parser.parse_args()
 
 
@@ -332,6 +333,14 @@ def main():
     input_dir = Path(args.input_dir).resolve()
     output_dir = ensure_output_dir(input_dir, args.output_dir)
     paths = find_loci_files(input_dir)
+    if args.samples_file:
+        from phyluce.subsets import read_sample_list
+        selected = set(read_sample_list(args.samples_file))
+        available = {infer_sample_id(path) for path in paths}
+        missing = selected - available
+        if missing:
+            raise RuntimeError("Samples missing stage 5 loci records: {}".format(", ".join(sorted(missing))))
+        paths = [path for path in paths if infer_sample_id(path) in selected]
     rows = read_loci_files(paths)
     loci, samples, by_pair = build_presence(rows)
     complete_locus_list = complete_loci(loci, samples, by_pair)
