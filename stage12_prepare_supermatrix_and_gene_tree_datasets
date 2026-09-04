@@ -2,6 +2,7 @@
 
 import argparse
 import csv
+import shlex
 import shutil
 from collections import OrderedDict
 from pathlib import Path
@@ -403,6 +404,7 @@ def resolve_project_prefix(input_dir, output_dir, aggregated_loci):
 
 
 def write_iqtree_script(path, phylip_path, charset_path, project_prefix):
+    copy_progress_monitor(path.parent)
     iqtree_prefix = "{}_{}".format(project_prefix, phylip_path.stem)
     command = [
         "iqtree",
@@ -424,7 +426,13 @@ def write_iqtree_script(path, phylip_path, charset_path, project_prefix):
     with open(path, "w") as handle:
         handle.write("#!/usr/bin/env bash\n")
         handle.write("set -euo pipefail\n\n")
-        handle.write("{}\n".format(" ".join(command)))
+        handle.write('SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\ncd "${SCRIPT_DIR}"\n\n')
+        handle.write("PROGRESS_STATUS={}\n".format(shlex.quote("./" + iqtree_prefix + ".progress_status")))
+        handle.write(progress_status_setup())
+        handle.write('if [[ "${IQTREE_PROGRESS:-1}" != "0" ]]; then\n')
+        handle.write('  bash ./watch_iqtree_progress_htop.sh --launch {} "${{IQTREE_PROGRESS_INTERVAL:-60}}" 0 "$PROGRESS_STATUS" || true\n'.format(shlex.quote("./" + iqtree_prefix + ".log")))
+        handle.write("fi\n\n")
+        handle.write("{}\n".format(" ".join(shlex.quote(part) for part in command)))
     path.chmod(0o755)
 
 
@@ -434,9 +442,34 @@ def write_executable_script(path, content):
     path.chmod(0o755)
 
 
+def copy_progress_monitor(directory):
+    source = Path(__file__).resolve().parent / "watch_iqtree_progress_htop.sh"
+    destination = Path(directory) / source.name
+    shutil.copyfile(source, destination)
+    destination.chmod(0o755)
+
+
+def progress_status_setup():
+    return """printf 'RUNNING\\n' > "$PROGRESS_STATUS"
+progress_exit() {
+  local code=$?
+  if (( code == 0 )); then
+    printf 'FINISHED\\n' > "$PROGRESS_STATUS"
+  else
+    printf 'FAILED (exit %s)\\n' "$code" > "$PROGRESS_STATUS"
+  fi
+}
+trap progress_exit EXIT
+"""
+
+
 def write_gene_tree_readme(path, row, project_prefix):
     lines = [
         "# ASTRAL gene-tree workflow",
+        "",
+        "`01_run_iqtree_gene_trees.sh` automatically opens one batch progress monitor.",
+        "監看腳本 `watch_iqtree_progress_htop.sh` 位於同一資料夾；關閉監看不會停止 IQ-TREE。",
+        "Use `IQTREE_PROGRESS=0` to disable automatic monitoring, or `IQTREE_PROGRESS_INTERVAL=10` to refresh every 10 seconds.",
         "",
         "Combination / 分析組合:",
         "",
@@ -569,6 +602,7 @@ def write_gene_tree_readme(path, row, project_prefix):
 
 
 def write_gene_tree_analysis_scripts(combo_root, project_prefix):
+    copy_progress_monitor(combo_root)
     write_executable_script(
         combo_root / "01_run_iqtree_gene_trees.sh",
         """#!/usr/bin/env bash
@@ -604,16 +638,22 @@ fi
 
 mkdir -p "${OUTDIR}"
 
+PROGRESS_STATUS="${OUTDIR}/.progress_status"
+""" + progress_status_setup() + """
+if [[ "${IQTREE_PROGRESS:-1}" != "0" ]]; then
+  bash ./watch_iqtree_progress_htop.sh --launch "${OUTDIR}" "${IQTREE_PROGRESS_INTERVAL:-60}" "${ALIGNMENT_COUNT}" "$PROGRESS_STATUS" || true
+fi
+
 find "${ALIGNMENT_DIR}" -maxdepth 1 -type f -name "*.fasta" -print0 | sort -z | \
   xargs -0 -n 1 -P "${JOBS}" bash -c '
     set -euo pipefail
-    aln="$1"
-    outdir="$2"
-    iqtree_bin="$3"
-    threads="$4"
-    model="$5"
-    bootstraps="$6"
-    extra_args="$7"
+    outdir="$1"
+    iqtree_bin="$2"
+    threads="$3"
+    model="$4"
+    bootstraps="$5"
+    extra_args="$6"
+    aln="$7"
     base="$(basename "$aln" .fasta)"
     prefix="${outdir}/${base}"
     if [ -s "${prefix}.treefile" ]; then
@@ -622,7 +662,7 @@ find "${ALIGNMENT_DIR}" -maxdepth 1 -type f -name "*.fasta" -print0 | sort -z | 
     fi
     "${iqtree_bin}" -s "${aln}" -m "${model}" -B "${bootstraps}" \
       -T "${threads}" --prefix "${prefix}" ${extra_args}
-  ' bash {} "${OUTDIR}" "${IQTREE_BIN}" "${THREADS_PER_JOB}" \
+  ' bash "${OUTDIR}" "${IQTREE_BIN}" "${THREADS_PER_JOB}" \
     "${MODEL}" "${BOOTSTRAPS}" "${EXTRA_IQTREE_ARGS}"
 """,
     )

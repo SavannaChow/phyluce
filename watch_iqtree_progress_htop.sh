@@ -1,14 +1,74 @@
 #!/usr/bin/env bash
 set -u
 
+# --launch opens one independent monitor. The monitor never controls IQ-TREE.
+if [[ "${1:-}" == "--launch" ]]; then
+    shift
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    target="${1:?Missing IQ-TREE log or output directory}"
+    [[ "$target" == /* ]] || target="$PWD/$target"
+    state="${4:-}"
+    [[ -z "$state" || "$state" == /* ]] || state="$PWD/$state"
+    printf -v monitor_command '%q ' bash "$SCRIPT_DIR/watch_iqtree_progress_htop.sh" "$target" "${2:-60}" "${3:-0}" "$state"
+    if [[ -n "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
+        tmux new-window -n "IQ-TREE progress" "$monitor_command" && exit 0
+    fi
+    if [[ -n "${STY:-}" ]] && command -v screen >/dev/null 2>&1; then
+        screen -t "IQ-TREE progress" bash -c "$monitor_command" && exit 0
+    fi
+    if [[ -z "${SSH_CONNECTION:-}" && "$(uname -s)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then
+        osascript - "$monitor_command" <<'APPLESCRIPT' >/dev/null 2>&1 && exit 0
+on run argv
+    tell application "Terminal"
+        activate
+        do script (item 1 of argv)
+    end tell
+end run
+APPLESCRIPT
+    fi
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+        for terminal in gnome-terminal konsole x-terminal-emulator xterm; do
+            if command -v "$terminal" >/dev/null 2>&1; then
+                if [[ "$terminal" == "gnome-terminal" ]]; then
+                    "$terminal" -- bash -c "$monitor_command" >/dev/null 2>&1 &
+                else
+                    "$terminal" -e bash -c "$monitor_command" >/dev/null 2>&1 &
+                fi
+                printf '已啟動進度視窗；若視窗未出現，可手動執行：\n%s\n' "$monitor_command"
+                exit 0
+            fi
+        done
+    fi
+    if command -v tmux >/dev/null 2>&1; then
+        session="iqtree-progress-$$"
+        if tmux new-session -d -s "$session" "$monitor_command"; then
+            printf '進度監看已在 tmux 啟動。另一個終端執行：tmux attach -t %s\n' "$session"
+            exit 0
+        fi
+    fi
+    printf '無可用的獨立視窗工具；分析照常執行。請在另一個終端執行：\n%s\n' "$monitor_command"
+    exit 0
+fi
+
 LOG_FILE="${1:-}"
 INTERVAL="${2:-60}"
+BATCH_TOTAL="${3:-0}"
+STATUS_FILE="${4:-}"
+
+if ! [[ "$INTERVAL" =~ ^[0-9]+([.][0-9]+)?$ ]] || [[ "$INTERVAL" =~ ^0+([.]0+)?$ ]]; then
+    echo "更新秒數必須大於 0" >&2
+    exit 1
+fi
+if ! [[ "$BATCH_TOTAL" =~ ^[0-9]+$ ]]; then
+    echo "Locus 數量必須是非負整數" >&2
+    exit 1
+fi
 
 if [[ -z "$LOG_FILE" ]]; then
     LOG_FILE="$(find . -maxdepth 1 -type f -name '*.log' -print -quit)"
 fi
 
-if [[ -z "$LOG_FILE" || ! -f "$LOG_FILE" ]]; then
+if [[ -z "$LOG_FILE" ]]; then
     echo "用法：$0 IQTREE.log [更新秒數]"
     echo "例如：$0 AhyaTW_edge-incomplete-min_taxa_050.log 60"
     exit 1
@@ -106,6 +166,38 @@ phase_color() {
 }
 
 while true; do
+    run_status=""
+    [[ -n "$STATUS_FILE" && -f "$STATUS_FILE" ]] && run_status="$(cat "$STATUS_FILE")"
+    if (( BATCH_TOTAL > 0 )); then
+        completed=0
+        errors=0
+        for locus_log in "$LOG_FILE"/*.log; do
+            [[ -f "$locus_log" ]] || continue
+            if grep -qE 'Analysis finished|Total wall-clock time used' "$locus_log"; then
+                completed=$((completed + 1))
+            elif grep -qE '^ERROR|^Error' "$locus_log"; then
+                errors=$((errors + 1))
+            fi
+        done
+        [[ "$run_status" == "FINISHED" ]] && completed=$BATCH_TOTAL
+        clear 2>/dev/null || true
+        printf '%sIQ-TREE Gene-tree Progress%s\n\n' "$BOLD$CYAN" "$RESET"
+        printf 'Folder: %s\nStatus: %s\n' "$LOG_FILE" "${run_status:-RUNNING}"
+        progress_bar "$completed" "$BATCH_TOTAL" 45
+        printf '  %s / %s loci finished\nError logs: %s\n' "$completed" "$BATCH_TOTAL" "$errors"
+        printf 'Refresh: %ss | Ctrl-C exits this monitor only.\n' "$INTERVAL"
+        [[ "$run_status" == "FINISHED" || "$run_status" == FAILED* ]] && exit 0
+        [[ -z "$STATUS_FILE" && "$completed" -ge "$BATCH_TOTAL" ]] && exit 0
+        sleep "$INTERVAL"
+        continue
+    fi
+    if [[ ! -f "$LOG_FILE" ]]; then
+        clear 2>/dev/null || true
+        printf 'IQ-TREE: %s\n等待 log 產生：%s\nCtrl-C 只關閉監看。\n' "${run_status:-WAITING}" "$LOG_FILE"
+        [[ "$run_status" == FAILED* || "$run_status" == "FINISHED" ]] && exit 0
+        sleep "$INTERVAL"
+        continue
+    fi
     line_model="$(last_line_no 'In ModelFinder|ModelFinder requires|Model selection')"
     line_merge="$(last_line_no 'Merging partitions|Partition merging|merging partitions|merge partitions')"
     line_model_done="$(last_line_no 'CPU time for ModelFinder|Wall-clock time for ModelFinder')"
@@ -147,6 +239,10 @@ while true; do
         status="FINISHED"
         status_color="$CYAN"
     fi
+    if [[ -n "$run_status" ]]; then
+        status="$run_status"
+        [[ "$status" == FAILED* ]] && status_color="$RED"
+    fi
 
     key_line="$(
         grep -E \
@@ -160,7 +256,7 @@ while true; do
     (( BAR_WIDTH < 20 )) && BAR_WIDTH=20
     (( BAR_WIDTH > 70 )) && BAR_WIDTH=70
 
-    clear
+    clear 2>/dev/null || true
 
     # Header
     printf "${BOLD}${CYAN}┌"
@@ -198,6 +294,7 @@ while true; do
         )"
 
         elapsed="$(sed -E 's/.*Time: ([0-9]+)h:([0-9]+)m:([0-9]+)s.*/\1 \2 \3/' <<< "$latest")"
+        [[ "$elapsed" =~ ^[0-9]+[[:space:]][0-9]+[[:space:]][0-9]+$ ]] || elapsed="0 0 0"
         read -r eh em es <<< "$elapsed"
         elapsed_sec=$((10#$eh*3600 + 10#$em*60 + 10#$es))
 
@@ -277,6 +374,6 @@ while true; do
     repeat_char "─" $((W - 2))
     printf "┘${RESET}\n"
 
-    [[ "$status" == "FINISHED" ]] && exit 0
+    [[ "$status" == "FINISHED" || "$status" == FAILED* ]] && exit 0
     sleep "$INTERVAL"
 done

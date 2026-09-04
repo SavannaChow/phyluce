@@ -231,3 +231,4 @@ wc -l cowman2023_TLS_definition_organism.tsv
 [2026-09-03 11:49:30] [from Darwin SavannaMacBookPro-10.local]  4846  python3 fundamental_plot.py 2408
 [2026-09-03 11:54:12] [from Darwin SavannaMacBookPro-10.local]  4846  python3 fundamental_plot.py 2408
 [2026-09-04 12:10:54] [from Darwin SavannaMacBookPro-10.local]  4847  xattr -cr '/Applications/usage.app/'
+[2026-09-04 12:17:42] [from Darwin SavannaMacBookPro-10.local]  4847  xattr -cr '/Applications/usage.app/'

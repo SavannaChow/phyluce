@@ -94,10 +94,7 @@ def test_stage12_writes_named_iqtree_script_for_supermatrix(tmp_path):
     )
     assert script.is_file()
     assert script.stat().st_mode & stat.S_IXUSR
-    assert script.read_text().splitlines() == [
-        "#!/usr/bin/env bash",
-        "set -euo pipefail",
-        "",
+    assert script.read_text().splitlines()[-1:] == [
         (
             "iqtree -s ./edge-incomplete-min_taxa_050.phylip "
             "-p ./edge-incomplete-min_taxa_050.charsets.nexus "
@@ -105,6 +102,12 @@ def test_stage12_writes_named_iqtree_script_for_supermatrix(tmp_path):
             "--prefix ./Acropora_edge-incomplete-min_taxa_050"
         ),
     ]
+    assert 'cd "${SCRIPT_DIR}"' in script.read_text()
+    assert "watch_iqtree_progress_htop.sh --launch ./Acropora_edge-incomplete-min_taxa_050.log" in script.read_text()
+    monitor = script.parent / "watch_iqtree_progress_htop.sh"
+    assert monitor.read_bytes() == (ROOT / monitor.name).read_bytes()
+    assert monitor.stat().st_mode & stat.S_IXUSR
+    subprocess.run(["bash", "-n", str(script)], check=True)
 
     manifest = (output_root / "branch_manifest.tsv").read_text()
     assert "iqtree_script" in manifest
@@ -183,6 +186,7 @@ def test_stage12_writes_astral_workflow_for_gene_tree_branch(tmp_path):
         / "min_taxa_075"
     )
     expected_scripts = [
+        "watch_iqtree_progress_htop.sh",
         "01_run_iqtree_gene_trees.sh",
         "02_collect_gene_trees.sh",
         "03_collapse_low_support_branches.sh",
@@ -193,6 +197,7 @@ def test_stage12_writes_astral_workflow_for_gene_tree_branch(tmp_path):
         script = combo / script_name
         assert script.is_file()
         assert script.stat().st_mode & stat.S_IXUSR
+        subprocess.run(["bash", "-n", str(script)], check=True)
 
     readme = (combo / "README_ASTRAL.md").read_text()
     assert "Recommended workflow / 建議流程" in readme

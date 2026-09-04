@@ -19,6 +19,9 @@
 與原本 stage 12 一樣，stage 13 **產生建樹資料與腳本，不會自動啟動建樹**。
 `prepared` 表示 stage 7–12 的資料準備完成，不表示 IQ-TREE 或 ASTRAL 已跑完。
 
+產生的 IQ-TREE 腳本旁會附上 `watch_iqtree_progress_htop.sh`，執行分析時會
+自動嘗試開啟另一個進度視窗。詳見 [IQ-TREE 進度監看](iqtree-progress.md)。
+
 ## 資料夾
 
 日期時間使用台灣時間，格式為 `名稱_YYYYMMDD_HHMMSS`。
