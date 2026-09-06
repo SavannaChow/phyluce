@@ -233,3 +233,4 @@ wc -l cowman2023_TLS_definition_organism.tsv
 [2026-09-04 12:10:54] [from Darwin SavannaMacBookPro-10.local]  4847  xattr -cr '/Applications/usage.app/'
 [2026-09-04 12:17:42] [from Darwin SavannaMacBookPro-10.local]  4847  xattr -cr '/Applications/usage.app/'
 [2026-09-04 15:42:15] [from Darwin SavannaMacBookPro-10.local]  4847  xattr -cr '/Applications/usage.app/'
+[2026-09-06 11:51:21] [from Darwin SavannaMacBookPro-10.local]  4864  ssh allenchen@140.109.28.218
