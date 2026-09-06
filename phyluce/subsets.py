@@ -315,6 +315,14 @@ def stream_stage(command, logger, log_path, lock_fd):
             raise
 
 
+def first_missing_or_empty_completed_stage(branch, last_completed_stage, launcher):
+    for stage in range(7, min(last_completed_stage, 12) + 1):
+        output = branch / launcher.STAGE_NAMES[stage]
+        if not output.is_dir() or not any(output.iterdir()):
+            return stage
+    return None
+
+
 def run_subset(project, branch, args, launcher):
     info = load_info(branch)
     samples = sorted(read_sample_list(branch / EDITABLE))
@@ -322,7 +330,21 @@ def run_subset(project, branch, args, launcher):
     if "analysis_samples" in info:
         if samples != info["analysis_samples"] or sorted(read_sample_list(branch / RECORDS / USED)) != samples:
             raise RuntimeError("Sample list changed after analysis started. Copy this subset to a new named branch.")
-        if info["status"] == "prepared":
+        missing_stage = first_missing_or_empty_completed_stage(
+            branch, info["last_completed_stage"], launcher
+        )
+        if missing_stage is not None:
+            print(
+                "Stage {} output is missing or empty; resuming this subset from Stage {}.".format(
+                    missing_stage, missing_stage
+                )
+            )
+            info["last_completed_stage"] = missing_stage - 1
+            info["status"] = "interrupted"
+            info.pop("error", None)
+            save_info(branch, info)
+            refresh_index(project)
+        elif info["status"] == "prepared":
             print("This subset is already prepared. Tree-running scripts are in its stage 12 folder; create/copy a branch for a different analysis.")
             return
         for key in SETTINGS_KEYS:

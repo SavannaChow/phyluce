@@ -64,6 +64,9 @@
   想加回樣本，可從 `analysis_records/all_samples.tsv` 複製完整 ID 到新名單。
 - `run`：草稿開始分析；失敗或中斷的分支從最後完成的 stage 之後繼續。
   尚未完成的 stage 會清除其分支內的部分輸出後重跑。
+- 已完成的分支再次執行 `run` 時，會檢查已記錄完成的 Stage 7–12 資料夾。
+  如果某個 Stage 資料夾已被整個刪除或是空的，會從該 Stage 開始重跑，並重建其後續 Stage；
+  例如只刪除 `12_Analysis_Branches/`，就只重建 Stage 12，保留 Stage 7–11。
 - `list`：列出分支和狀態。`analysis_index.tsv` 另外提供樣本數、完整度門檻及進度。
 
 開始後不能更改同一分支的樣本名單或參數再續跑；應 `copy` 成新分支。

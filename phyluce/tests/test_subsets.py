@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -125,6 +126,16 @@ def test_two_independent_subsets_rebuild_loci_and_preserve_original(project):
     timestamp = (first / "12_Analysis_Branches" / "branch_manifest.tsv").stat().st_mtime_ns
     assert "already prepared" in cli(project, "--subset-action", "run", "--subset-dir", first.name).stdout
     assert (first / "12_Analysis_Branches" / "branch_manifest.tsv").stat().st_mtime_ns == timestamp
+
+    stage11_manifest = first / "11_Filtered_Locus_ALIGNMENTS" / "threshold_manifest.tsv"
+    stage11_timestamp = stage11_manifest.stat().st_mtime_ns
+    shutil.rmtree(first / "12_Analysis_Branches")
+    resumed = cli(project, "--subset-action", "run", "--subset-dir", first.name)
+    assert "Stage 12 output is missing or empty" in resumed.stdout
+    assert stage11_manifest.stat().st_mtime_ns == stage11_timestamp
+    assert (first / "12_Analysis_Branches" / "branch_manifest.tsv").is_file()
+    assert metadata(first)["status"] == "prepared"
+
     subsets.write_samples(first / subsets.EDITABLE, list("ABCDE"))
     error = cli(project, "--subset-action", "run", "--subset-dir", first.name, check=False)
     assert error.returncode != 0 and "Sample list changed" in error.stderr
