@@ -86,7 +86,7 @@ def test_gene_tree_launches_one_batch_monitor_and_runs_each_locus(tmp_path, runt
     result = subprocess.run(["bash", str(folder / "01_run_iqtree_gene_trees.sh")], cwd=tmp_path,
                             env=runtime, text=True, capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr
-    assert len(list((folder / "iqtree_gene_trees").glob("*.treefile"))) == 2
+    assert len(list((folder / "01_iqtree_gene_trees").glob("*.treefile"))) == 2
     calls = Path(runtime["TMUX_CAPTURE"]).read_text().splitlines()
     assert len(calls) == 1
     command = shlex.split(json.loads(calls[0])[-1])

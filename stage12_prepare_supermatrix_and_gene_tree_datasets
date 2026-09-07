@@ -583,6 +583,9 @@ class NewickParser:
             )
 
 
+INFORMATIVE_NUCLEOTIDES = set("ACGTURYSWKMBDHV")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Validate one-tree-per-line Newick input before ASTRAL."
@@ -592,7 +595,10 @@ def main():
     parser.add_argument("--expected-count", type=int)
     parser.add_argument(
         "--alignment",
-        help="Require the single tree's leaf labels to match this FASTA's headers.",
+        help=(
+            "Require every FASTA taxon with informative nucleotide data to occur "
+            "in the single tree; all-missing taxa may be absent."
+        ),
     )
     args = parser.parse_args()
 
@@ -616,18 +622,40 @@ def main():
     if not lines:
         errors.append("no non-empty gene trees found")
     expected_leaves = None
+    allowed_leaves = None
     if args.alignment:
         alignment = Path(args.alignment)
         if not alignment.is_file():
             errors.append("alignment file not found: {}".format(alignment))
         else:
-            expected_leaves = []
+            records = []
+            current_label = None
+            sequence = []
             for raw in alignment.read_text().splitlines():
-                if raw.startswith(">"):
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.startswith(">"):
+                    if current_label is not None:
+                        records.append((current_label, "".join(sequence)))
                     label = raw[1:].strip().split()[0]
-                    expected_leaves.append(label)
-            if len(expected_leaves) != len(set(expected_leaves)):
+                    current_label = label
+                    sequence = []
+                elif current_label is None:
+                    errors.append("alignment sequence appears before the first FASTA header")
+                else:
+                    sequence.append(line)
+            if current_label is not None:
+                records.append((current_label, "".join(sequence)))
+            all_alignment_leaves = [label for label, sequence in records]
+            if len(all_alignment_leaves) != len(set(all_alignment_leaves)):
                 errors.append("alignment contains duplicate FASTA headers")
+            allowed_leaves = set(all_alignment_leaves)
+            expected_leaves = {
+                label
+                for label, sequence in records
+                if any(base.upper() in INFORMATIVE_NUCLEOTIDES for base in sequence)
+            }
             if len(lines) != 1:
                 errors.append("--alignment requires exactly one gene tree")
 
@@ -636,8 +664,9 @@ def main():
             newick = NewickParser(tree)
             newick.parse()
             if expected_leaves is not None:
-                missing = sorted(set(expected_leaves) - set(newick.leaves))
-                extra = sorted(set(newick.leaves) - set(expected_leaves))
+                tree_leaves = set(newick.leaves)
+                missing = sorted(expected_leaves - tree_leaves)
+                extra = sorted(tree_leaves - allowed_leaves)
                 if missing or extra:
                     raise NewickError(
                         "tree/alignment taxon mismatch; missing={} extra={}".format(
@@ -687,6 +716,7 @@ def write_gene_tree_readme(path, row, project_prefix):
         "Use `IQTREE_PROGRESS=0` to disable automatic monitoring, or `IQTREE_PROGRESS_INTERVAL=10` to refresh every 10 seconds.",
         "Gene-tree FASTA headers use the first field before `|` as the taxon name; sequence characters are unchanged.",
         "All scripts validate one complete Newick tree per non-empty line before continuing.",
+        "Alignment taxa containing only `?`, `-`, `N`, or `.` may be absent from an IQ-TREE treefile.",
         "",
         "Combination / 分析組合:",
         "",
@@ -720,26 +750,20 @@ def write_gene_tree_readme(path, row, project_prefix):
         "",
         "Output:",
         "",
-        "- `iqtree_gene_trees/<locus>.treefile`",
-        "- `iqtree_gene_trees/<locus>.iqtree`",
-        "- `iqtree_gene_trees/<locus>.log`",
+        "- `01_iqtree_gene_trees/<locus>.treefile`",
+        "- `01_iqtree_gene_trees/<locus>.iqtree`",
+        "- `01_iqtree_gene_trees/<locus>.log`",
         "",
         "### 02_collect_gene_trees.sh",
         "",
-        (
-            "English: Checks that every alignment has exactly one complete, valid "
-            "Newick `.treefile`, then merges them into one ASTRAL input file."
-        ),
+        "English: Merges the first non-empty line of every `.treefile` into one ASTRAL input file.",
         "",
-        "中文：這一步會檢查每個 locus 是否都有成功產生 `.treefile`。",
-        "如果有缺漏、截斷或 Newick 格式錯誤會停止，不會讓 ASTRAL 吃到不完整的 gene-tree set。",
-        "通過檢查後，會把所有 gene trees 合併成一個檔案。",
+        "中文：這一步直接把 `01_iqtree_gene_trees/*.treefile` 的第一個非空白行",
+        "合併成 `all_gene_trees.tre`，不另外檢查 alignment taxa。",
         "",
         "Output:",
         "",
-        "- `gene_trees/gene_tree_files.txt`",
-        "- `gene_trees/all_gene_trees.tre`",
-        "- `gene_trees/gene_tree_count.txt`",
+        "- `02_gene_trees/all_gene_trees.tre`",
         "",
         "### 03_collapse_low_support_branches.sh",
         "",
@@ -757,8 +781,7 @@ def write_gene_tree_readme(path, row, project_prefix):
         "",
         "Output:",
         "",
-        "- `gene_trees/all_gene_trees.BS<threshold>collapsed.tre` (default: `BS10`)",
-        "- `gene_trees/collapsed_gene_trees_path.txt`（記錄實際門檻輸出檔）",
+        "- `03_collapsed_gene_trees/all_gene_trees.BS10collapsed.tre`",
         "",
         "### 04_run_treeshrink.sh",
         "",
@@ -770,55 +793,35 @@ def write_gene_tree_readme(path, row, project_prefix):
         "中文：這一步也是 optional，但跟 collapse 不同。TreeShrink 會依據 branch",
         "length 找 unusually long branches，並移除對應的 outlier leaves/taxa。",
         "也就是說，某些 gene trees 裡的 taxa 可能會被移除。跑完後一定要先看",
-        "`treeshrink/treeshrink.txt`，確認移除了哪些 taxa，再決定要不要用",
+        "`04_treeshrink/treeshrink.txt`，確認移除了哪些 taxa，再決定要不要用",
         "TreeShrink 結果跑 ASTRAL。",
         "",
         "Input choices:",
         "",
-        "- `raw`: `gene_trees/all_gene_trees.tre`",
-        "- `collapsed`: the path recorded by `gene_trees/collapsed_gene_trees_path.txt`",
+        "- `collapsed`: `03_collapsed_gene_trees/all_gene_trees.BS10collapsed.tre`",
         "- Default: `collapsed`; TreeShrink evaluates the complete multi-gene tree set together.",
         "",
         "Output:",
         "",
-        "- `treeshrink/treeshrink.trees`",
-        "- `treeshrink/treeshrink.txt`",
-        "- `treeshrink/treeshrink.log`",
-        "- `treeshrink/input_source.txt`",
+        "- `04_treeshrink/treeshrink.tre`",
+        "- `04_treeshrink/treeshrink.txt`",
+        "- `04_treeshrink/treeshrink.log`",
         "",
         "### 05_run_astral.sh",
         "",
-        "English: Runs ASTRAL and lets you choose which gene-tree input to use.",
+        "English: Runs `astral-mp` on the TreeShrink output.",
         "",
-        "中文：這一步會跑 ASTRAL species tree。執行時可以選擇使用哪一種 gene",
-        "trees：`raw`、`collapsed` 或 `treeshrink`。",
-        "",
-        "Input choices:",
-        "",
-        "- `raw`: 原始 IQ-TREE gene trees，沒有額外處理。",
-        "- `collapsed`: 低支持度分枝已 collapse，保留 taxa，但降低低支持分枝",
-        "  影響。",
-        "- `treeshrink`: TreeShrink 過的 gene trees，可能已移除 long-branch",
-        "  outlier taxa。",
+        "中文：這一步直接以 `04_treeshrink/treeshrink.tre` 跑 ASTRAL-MP species tree。",
         "",
         "Non-interactive examples:",
         "",
         "```bash",
-        "ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh raw",
-        "ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh collapsed",
-        "ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh treeshrink",
+        "./05_run_astral.sh",
         "```",
-        "",
-        "Java ASTRAL `-t` is an annotation level, not a thread count. By default this",
-        "workflow omits `-t` and uses ASTRAL local-posterior annotations. Set",
-        "`ASTRAL_ANNOTATION=1` for quartet support or `ASTRAL_ANNOTATION=2` for full annotations.",
-        "Java heap remains configurable with `JAVA_MEMORY`, for example `JAVA_MEMORY=32G`.",
         "",
         "ASTRAL output:",
         "",
-        "- `astral/{}_all_gene_trees.raw.astral.tre`".format(project_prefix),
-        "- `astral/{}_all_gene_trees.BS<threshold>collapsed.astral.tre`".format(project_prefix),
-        "- `astral/{}_all_gene_trees.treeshrink.astral.tre`".format(project_prefix),
+        "- `05_astral/astral_species.tree`",
         "",
     ]
     with open(path, "w") as handle:
@@ -855,7 +858,7 @@ else
 fi
 echo "Using JOBS=${JOBS}, THREADS_PER_JOB=${THREADS_PER_JOB} (total threads: $((JOBS * THREADS_PER_JOB))), MODEL=${MODEL}, BOOTSTRAPS=${BOOTSTRAPS}"
 ALIGNMENT_DIR="alignments"
-OUTDIR="iqtree_gene_trees"
+OUTDIR="01_iqtree_gene_trees"
 INVALID_DIR="${OUTDIR}/invalid_previous"
 
 command -v "${IQTREE_BIN}" >/dev/null 2>&1 || {
@@ -934,81 +937,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-ALIGNMENT_DIR="alignments"
-TREE_DIR="iqtree_gene_trees"
-OUTDIR="gene_trees"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-VALIDATOR="${SCRIPT_DIR}/validate_gene_trees.py"
-LIST="${OUTDIR}/gene_tree_files.txt"
-MISSING="${OUTDIR}/missing_gene_trees.txt"
-INVALID="${OUTDIR}/invalid_gene_trees.txt"
+TREE_DIR="01_iqtree_gene_trees"
+OUTDIR="02_gene_trees"
 ALL_TREES="${OUTDIR}/all_gene_trees.tre"
-COUNT_FILE="${OUTDIR}/gene_tree_count.txt"
-
-if [ ! -d "${ALIGNMENT_DIR}" ]; then
-  echo "ERROR: Missing alignment directory: ${ALIGNMENT_DIR}" >&2
-  exit 1
-fi
-if [ ! -d "${TREE_DIR}" ]; then
-  echo "ERROR: Missing IQ-TREE output directory: ${TREE_DIR}" >&2
-  exit 1
-fi
-command -v "${PYTHON_BIN}" >/dev/null 2>&1 || {
-  echo "ERROR: Python executable not found: ${PYTHON_BIN}" >&2
-  exit 1
-}
 
 mkdir -p "${OUTDIR}"
-: > "${LIST}"
-: > "${MISSING}"
-: > "${INVALID}"
+for tree in "${TREE_DIR}"/*.treefile; do
+  awk 'NF { print; exit }' "${tree}"
+done > "${ALL_TREES}"
 
-shopt -s nullglob
-ALIGNMENTS=("${ALIGNMENT_DIR}"/*.fasta)
-if [ "${#ALIGNMENTS[@]}" -eq 0 ]; then
-  echo "ERROR: No .fasta alignments found under ${ALIGNMENT_DIR}" >&2
-  exit 1
-fi
-
-for aln in "${ALIGNMENTS[@]}"; do
-  base="$(basename "${aln}" .fasta)"
-  tree="${TREE_DIR}/${base}.treefile"
-  if [ ! -s "${tree}" ]; then
-    printf "%s\\n" "${base}" >> "${MISSING}"
-  elif "${PYTHON_BIN}" "${VALIDATOR}" --single --alignment "${aln}" "${tree}" >/dev/null; then
-    printf "%s\\n" "${tree}" >> "${LIST}"
-  else
-    printf "%s\\n" "${base}" >> "${INVALID}"
-  fi
-done
-
-if [ -s "${MISSING}" ]; then
-  echo "ERROR: Missing non-empty .treefile outputs for these loci:" >&2
-  cat "${MISSING}" >&2
-  exit 1
-fi
-if [ -s "${INVALID}" ]; then
-  echo "ERROR: Invalid or incomplete Newick .treefile outputs for these loci:" >&2
-  cat "${INVALID}" >&2
-  echo "Rerun 01_run_iqtree_gene_trees.sh to archive and rebuild them." >&2
-  exit 1
-fi
-
-TREE_COUNT="$(wc -l < "${LIST}" | tr -d " ")"
-if [ "${TREE_COUNT}" -eq 0 ]; then
-  echo "ERROR: No gene trees found." >&2
-  exit 1
-fi
-
-: > "${ALL_TREES}"
-while IFS= read -r tree; do
-  awk 'NF { print; exit }' "${tree}" >> "${ALL_TREES}"
-done < "${LIST}"
-
-"${PYTHON_BIN}" "${VALIDATOR}" --expected-count "${TREE_COUNT}" "${ALL_TREES}"
-
-printf "gene_trees\\t%s\\n" "${TREE_COUNT}" > "${COUNT_FILE}"
-echo "Wrote ${TREE_COUNT} gene trees to ${ALL_TREES}"
+echo "Wrote gene trees to ${ALL_TREES}"
 """,
     )
     write_executable_script(
@@ -1019,58 +957,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-NW_ED_BIN="${NW_ED_BIN:-nw_ed}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-VALIDATOR="${SCRIPT_DIR}/validate_gene_trees.py"
-SUPPORT_THRESHOLD="${1:-${SUPPORT_THRESHOLD:-}}"
-if [[ -z "${SUPPORT_THRESHOLD}" && -t 0 ]]; then
-  read -r -p "Collapse support threshold [10]: " value
-  SUPPORT_THRESHOLD="${value:-10}"
-fi
-SUPPORT_THRESHOLD="${SUPPORT_THRESHOLD:-10}"
-if [[ ! "${SUPPORT_THRESHOLD}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-  echo "ERROR: Support threshold must be numeric: ${SUPPORT_THRESHOLD}" >&2
-  exit 1
-fi
-if ! awk -v value="${SUPPORT_THRESHOLD}" 'BEGIN { exit(value >= 0 && value <= 100 ? 0 : 1) }'; then
-  echo "ERROR: Support threshold must be between 0 and 100: ${SUPPORT_THRESHOLD}" >&2
-  exit 1
-fi
-echo "Using support threshold: ${SUPPORT_THRESHOLD}"
-INPUT="gene_trees/all_gene_trees.tre"
-COUNT_FILE="gene_trees/gene_tree_count.txt"
-OUTPUT="gene_trees/all_gene_trees.BS${SUPPORT_THRESHOLD}collapsed.tre"
-OUTPUT_POINTER="gene_trees/collapsed_gene_trees_path.txt"
-TMP_OUTPUT="${OUTPUT}.tmp.$$"
-trap 'rm -f "${TMP_OUTPUT}"' EXIT
+mkdir -p "03_collapsed_gene_trees"
 
-command -v "${NW_ED_BIN}" >/dev/null 2>&1 || {
-  echo "ERROR: newick-utils nw_ed executable not found: ${NW_ED_BIN}" >&2
-  exit 1
-}
-if [ ! -s "${INPUT}" ]; then
-  echo "ERROR: Missing input gene trees: ${INPUT}" >&2
-  echo "Run 02_collect_gene_trees.sh first." >&2
-  exit 1
-fi
-if [ ! -s "${COUNT_FILE}" ]; then
-  echo "ERROR: Missing gene-tree count file: ${COUNT_FILE}" >&2
-  exit 1
-fi
-TREE_COUNT="$(awk -F '\\t' '$1 == "gene_trees" { print $2 }' "${COUNT_FILE}")"
-if [[ ! "${TREE_COUNT}" =~ ^[0-9]+$ ]] || [ "${TREE_COUNT}" -eq 0 ]; then
-  echo "ERROR: Invalid gene-tree count in ${COUNT_FILE}" >&2
-  exit 1
-fi
-
-"${PYTHON_BIN}" "${VALIDATOR}" --expected-count "${TREE_COUNT}" "${INPUT}"
-
-"${NW_ED_BIN}" "${INPUT}" "i & b<=${SUPPORT_THRESHOLD}" o > "${TMP_OUTPUT}"
-"${PYTHON_BIN}" "${VALIDATOR}" --expected-count "${TREE_COUNT}" "${TMP_OUTPUT}"
-mv "${TMP_OUTPUT}" "${OUTPUT}"
-printf "%s\\n" "${OUTPUT}" > "${OUTPUT_POINTER}"
-trap - EXIT
-echo "Wrote low-support-collapsed gene trees to ${OUTPUT}"
+nw_ed \
+  "02_gene_trees/all_gene_trees.tre" \
+  'i & b<=10' \
+  o \
+  > "03_collapsed_gene_trees/all_gene_trees.BS10collapsed.tre"
 """,
     )
     write_executable_script(
@@ -1081,77 +974,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-TREESHRINK_BIN="${TREESHRINK_BIN:-run_treeshrink.py}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-VALIDATOR="${SCRIPT_DIR}/validate_gene_trees.py"
-COUNT_FILE="gene_trees/gene_tree_count.txt"
-COLLAPSED_POINTER="gene_trees/collapsed_gene_trees_path.txt"
-MODE="${1:-}"
-TREESHRINK_ARGS="${TREESHRINK_ARGS:-}"
-
-if [ -z "${MODE}" ]; then
-  echo "Choose TreeShrink input:"
-  echo "1. raw       - gene_trees/all_gene_trees.tre"
-  echo "2. collapsed - low-support-collapsed gene trees (recommended)"
-  read -r -p "Enter choice [2]: " choice
-  case "${choice:-2}" in
-    1|raw) MODE="raw" ;;
-    2|collapsed) MODE="collapsed" ;;
-    *) echo "ERROR: Invalid choice: ${choice}" >&2; exit 1 ;;
-  esac
-fi
-
-case "${MODE}" in
-  raw)
-    INPUT="gene_trees/all_gene_trees.tre"
-    ;;
-  collapsed)
-    if [ ! -s "${COLLAPSED_POINTER}" ]; then
-      echo "ERROR: Missing ${COLLAPSED_POINTER}; run 03_collapse_low_support_branches.sh first." >&2
-      exit 1
-    fi
-    INPUT="$(head -n 1 "${COLLAPSED_POINTER}")"
-    ;;
-  *)
-    echo "ERROR: Expected raw or collapsed, got: ${MODE}" >&2
-    exit 1
-    ;;
-esac
-
-command -v "${TREESHRINK_BIN}" >/dev/null 2>&1 || {
-  echo "ERROR: TreeShrink executable not found: ${TREESHRINK_BIN}" >&2
-  exit 1
-}
-if [ ! -s "${INPUT}" ]; then
-  echo "ERROR: Missing TreeShrink input: ${INPUT}" >&2
-  exit 1
-fi
-if [ ! -s "${COUNT_FILE}" ]; then
-  echo "ERROR: Missing gene-tree count file: ${COUNT_FILE}" >&2
-  exit 1
-fi
-TREE_COUNT="$(awk -F '\\t' '$1 == "gene_trees" { print $2 }' "${COUNT_FILE}")"
-if [[ ! "${TREE_COUNT}" =~ ^[0-9]+$ ]] || [ "${TREE_COUNT}" -eq 0 ]; then
-  echo "ERROR: Invalid gene-tree count in ${COUNT_FILE}" >&2
-  exit 1
-fi
-
-"${PYTHON_BIN}" "${VALIDATOR}" --expected-count "${TREE_COUNT}" "${INPUT}"
-
-if [ -d "treeshrink" ]; then
-  STAMP="$(date +%Y%m%d_%H%M%S)"
-  mv "treeshrink" "treeshrink.previous_${STAMP}_$$"
-fi
-
-"${TREESHRINK_BIN}" -t "${INPUT}" -o "treeshrink" -O "treeshrink" ${TREESHRINK_ARGS}
-if [ ! -s "treeshrink/treeshrink.trees" ]; then
-  echo "ERROR: Expected TreeShrink output not found: treeshrink/treeshrink.trees" >&2
-  exit 1
-fi
-"${PYTHON_BIN}" "${VALIDATOR}" --expected-count "${TREE_COUNT}" "treeshrink/treeshrink.trees"
-printf "mode\\t%s\\ninput\\t%s\\n" "${MODE}" "${INPUT}" > "treeshrink/input_source.txt"
-echo "Wrote TreeShrink-filtered gene trees to treeshrink/treeshrink.trees"
-echo "Review removed leaves in treeshrink/treeshrink.txt before using this for ASTRAL."
+run_treeshrink.py \
+  -t "03_collapsed_gene_trees/all_gene_trees.BS10collapsed.tre" \
+  -o "04_treeshrink" \
+  -O "treeshrink" \
+  -f
 """,
     )
     write_executable_script(
@@ -1162,134 +989,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-ASTRAL_JAR="${ASTRAL_JAR:-}"
-JAVA_BIN="${JAVA_BIN:-java}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-VALIDATOR="${SCRIPT_DIR}/validate_gene_trees.py"
-COUNT_FILE="gene_trees/gene_tree_count.txt"
-COLLAPSED_POINTER="gene_trees/collapsed_gene_trees_path.txt"
-MODE="${1:-}"
-ASTRAL_ARGS="${ASTRAL_ARGS:-}"
-JAVA_MEMORY="${JAVA_MEMORY:-}"
-ASTRAL_ANNOTATION="${ASTRAL_ANNOTATION:-}"
+mkdir -p "05_astral"
 
-if [ -z "${MODE}" ]; then
-  echo "Choose gene tree input for ASTRAL:"
-  echo "1. raw        - original IQ-TREE gene trees"
-  echo "2. collapsed  - low-support branches collapsed"
-  echo "3. treeshrink - TreeShrink-filtered gene trees (recommended workflow)"
-  read -r -p "Enter choice [3]: " choice
-  case "${choice:-3}" in
-    1|raw) MODE="raw" ;;
-    2|collapsed) MODE="collapsed" ;;
-    3|treeshrink) MODE="treeshrink" ;;
-    *) echo "ERROR: Invalid choice: ${choice}" >&2; exit 1 ;;
-  esac
-fi
-
-if [[ -t 0 ]]; then
-  read -r -p "Java maximum memory [${JAVA_MEMORY:-8G}]: " value
-  JAVA_MEMORY="${value:-${JAVA_MEMORY:-8G}}"
-  read -r -p "ASTRAL annotation level [default: local posterior]: " value
-  ASTRAL_ANNOTATION="${value:-${ASTRAL_ANNOTATION}}"
-  read -r -p "Additional ASTRAL arguments [${ASTRAL_ARGS}]: " value
-  ASTRAL_ARGS="${value:-${ASTRAL_ARGS}}"
-else
-  JAVA_MEMORY="${JAVA_MEMORY:-8G}"
-fi
-if [ -n "${ASTRAL_ANNOTATION}" ] && [[ ! "${ASTRAL_ANNOTATION}" =~ ^[0-9]+$ ]]; then
-  echo "ERROR: ASTRAL annotation level must be an integer: ${ASTRAL_ANNOTATION}" >&2
-  exit 1
-fi
-echo "Using Java memory: ${JAVA_MEMORY}; ASTRAL annotation level: ${ASTRAL_ANNOTATION:-default local posterior}"
-
-case "${MODE}" in
-  raw)
-    INPUT="gene_trees/all_gene_trees.tre"
-    LABEL="raw"
-    ;;
-  collapsed)
-    if [ ! -s "${COLLAPSED_POINTER}" ]; then
-      echo "ERROR: Missing ${COLLAPSED_POINTER}; run 03_collapse_low_support_branches.sh first." >&2
-      exit 1
-    fi
-    INPUT="$(head -n 1 "${COLLAPSED_POINTER}")"
-    INPUT_BASENAME="$(basename "${INPUT}" .tre)"
-    LABEL="${INPUT_BASENAME#all_gene_trees.}"
-    ;;
-  treeshrink)
-    INPUT="treeshrink/treeshrink.trees"
-    LABEL="treeshrink"
-    ;;
-  *)
-    echo "ERROR: Expected raw, collapsed, or treeshrink, got: ${MODE}" >&2
-    exit 1
-    ;;
-esac
-
-command -v "${JAVA_BIN}" >/dev/null 2>&1 || {
-  echo "ERROR: Java executable not found: ${JAVA_BIN}" >&2
-  exit 1
-}
-if [ -z "${ASTRAL_JAR}" ] || [ ! -f "${ASTRAL_JAR}" ]; then
-  echo "ERROR: Set ASTRAL_JAR to the ASTRAL jar path before running." >&2
-  echo "Example: ASTRAL_JAR=/path/to/astral.5.7.8.jar ./05_run_astral.sh ${MODE}" >&2
-  exit 1
-fi
-if [ ! -s "${INPUT}" ]; then
-  echo "ERROR: Missing ASTRAL input: ${INPUT}" >&2
-  exit 1
-fi
-if [ ! -s "${COUNT_FILE}" ]; then
-  echo "ERROR: Missing gene-tree count file: ${COUNT_FILE}" >&2
-  exit 1
-fi
-TREE_COUNT="$(awk -F '\\t' '$1 == "gene_trees" { print $2 }' "${COUNT_FILE}")"
-if [[ ! "${TREE_COUNT}" =~ ^[0-9]+$ ]] || [ "${TREE_COUNT}" -eq 0 ]; then
-  echo "ERROR: Invalid gene-tree count in ${COUNT_FILE}" >&2
-  exit 1
-fi
-
-"${PYTHON_BIN}" "${VALIDATOR}" --expected-count "${TREE_COUNT}" "${INPUT}"
-
-mkdir -p "astral"
-PROJECT_PREFIX="__PROJECT_PREFIX__"
-OUTPUT="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.tre"
-LOG="astral/${PROJECT_PREFIX}_all_gene_trees.${LABEL}.astral.log"
-TMP_OUTPUT="${OUTPUT}.tmp.$$"
-trap 'rm -f "${TMP_OUTPUT}"' EXIT
-
-if [ -e "${OUTPUT}" ] || [ -e "${LOG}" ]; then
-  STAMP="$(date +%Y%m%d_%H%M%S)"
-  PREVIOUS="astral/previous_${STAMP}_$$"
-  mkdir -p "${PREVIOUS}"
-  for existing in "${OUTPUT}" "${LOG}"; do
-    if [ -e "${existing}" ]; then
-      mv "${existing}" "${PREVIOUS}/"
-    fi
-  done
-fi
-
-JAVA_OPTS=("-Xmx${JAVA_MEMORY}")
-ASTRAL_COMMAND=("${JAVA_BIN}" "${JAVA_OPTS[@]}" -jar "${ASTRAL_JAR}" -i "${INPUT}" -o "${TMP_OUTPUT}")
-if [ -n "${ASTRAL_ANNOTATION}" ]; then
-  ASTRAL_COMMAND+=("-t" "${ASTRAL_ANNOTATION}")
-fi
-if [ -n "${ASTRAL_ARGS}" ]; then
-  read -r -a EXTRA_ASTRAL_ARGS <<< "${ASTRAL_ARGS}"
-  ASTRAL_COMMAND+=("${EXTRA_ASTRAL_ARGS[@]}")
-fi
-"${ASTRAL_COMMAND[@]}" 2> "${LOG}"
-if [ ! -s "${TMP_OUTPUT}" ] || ! awk 'NF { last = $0 } END { exit(last ~ /;[[:space:]]*$/ ? 0 : 1) }' "${TMP_OUTPUT}"; then
-  echo "ERROR: ASTRAL did not produce a complete output tree: ${TMP_OUTPUT}" >&2
-  exit 1
-fi
-mv "${TMP_OUTPUT}" "${OUTPUT}"
-trap - EXIT
-
-echo "Wrote ASTRAL tree to ${OUTPUT}"
-echo "Wrote ASTRAL log to ${LOG}"
-""".replace("__PROJECT_PREFIX__", project_prefix),
+astral-mp \
+  -i "04_treeshrink/treeshrink.tre" \
+  -o "05_astral/astral_species.tree"
+""",
     )
 
 

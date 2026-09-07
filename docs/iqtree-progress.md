@@ -37,7 +37,7 @@ bash watch_iqtree_progress_htop.sh 你的分析.log 10
 ```
 
 分析腳本另外寫入 `.progress_status` 狀態檔：supermatrix 使用
-`<prefix>.progress_status`，gene-tree 使用 `iqtree_gene_trees/.progress_status`。
+`<prefix>.progress_status`，gene-tree 使用 `01_iqtree_gene_trees/.progress_status`。
 自動啟動的監看會讀取它，以區分正常完成和分析失敗。
 Gene-tree 中原本已存在 `.treefile` 而被跳過的 loci，依現有分析腳本的規則處理；
 整批成功結束時，總進度顯示全部完成。
