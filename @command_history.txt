@@ -235,3 +235,13 @@ wc -l cowman2023_TLS_definition_organism.tsv
 [2026-09-04 15:42:15] [from Darwin SavannaMacBookPro-10.local]  4847  xattr -cr '/Applications/usage.app/'
 [2026-09-06 11:51:21] [from Darwin SavannaMacBookPro-10.local]  4864  ssh allenchen@140.109.28.218
 [2026-09-07 14:04:17] [from Darwin SavannaMacBookPro-10.local]  4864  ssh allenchen@140.109.28.218
+[2026-09-08 13:14:26] [from Darwin SavannaMacBookPro-10.local]  4865  ssh allenchen@140.109.28.228
+[2026-09-08 15:16:14] [from Darwin SavannaMacBookPro-10.local]  4868  cd '/Users/savannachow/Downloads/2026/home/yasuda2/hifi/final_assembly/adivaricata/'
+[2026-09-17 15:44:15] [from Darwin SavannaMacBookPro-10.local]  4900  cd /Users/savannachow/Github/phylophoto
+git push origin codex/nas-sharing-v1 --tags
+[2026-09-17 15:59:54] [from Darwin SavannaMacBookPro-10.local]  4900  cd /Users/savannachow/Github/phylophoto
+git push origin codex/nas-sharing-v1 --tags
+[2026-09-17 16:04:49] [from Darwin SavannaMacBookPro-10.local]  4900  cd /Users/savannachow/Github/phylophoto
+git push origin codex/nas-sharing-v1 --tags
+[2026-09-17 16:04:57] [from Darwin SavannaMacBookPro-10.local]  4900  cd /Users/savannachow/Github/phylophoto
+git push origin codex/nas-sharing-v1 --tags
