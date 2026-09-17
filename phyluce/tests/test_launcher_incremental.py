@@ -186,6 +186,70 @@ def test_parallel_spades_runs_fstrim_after_concurrent_batch(monkeypatch, tmp_pat
     assert calls[-1] == ("keepalive_stop", None)
 
 
+@pytest.mark.parametrize("max_jobs", [1, 2])
+def test_spades_failure_skips_sample_and_continues(monkeypatch, tmp_path, max_jobs):
+    launcher = load_launcher()
+    calls = []
+    assembly_root = tmp_path / "02_Spades_assembly"
+
+    class Logger:
+        def info(self, message):
+            calls.append(("log", message))
+
+    def fake_run_spades(sample, *args):
+        calls.append(("spades", sample))
+        if sample == "large_sample":
+            raise RuntimeError("Command failed: spades.py")
+        contigs = assembly_root / sample / "contigs.fasta"
+        contigs.parent.mkdir(parents=True, exist_ok=True)
+        contigs.write_text(">contig\nACGT\n")
+        return True
+
+    summaries = []
+
+    monkeypatch.setattr(launcher, "run_spades", fake_run_spades)
+    monkeypatch.setattr(
+        launcher,
+        "write_spades_summary_table",
+        lambda samples, *args, **kwargs: summaries.append(list(samples)),
+    )
+
+    launcher.run_spades_for_samples(
+        {"small_a": None, "large_sample": None, "small_b": None},
+        tmp_path / "01_Trimmed",
+        assembly_root,
+        "spades.py",
+        16,
+        8,
+        max_jobs,
+        50,
+        "2",
+        None,
+        False,
+        False,
+        Logger(),
+        tmp_path / "00_Log",
+    )
+
+    assert {call for call in calls if call[0] == "spades"} == {
+        ("spades", "small_a"),
+        ("spades", "large_sample"),
+        ("spades", "small_b"),
+    }
+    assert summaries == [["small_a", "small_b"]]
+    assert any(
+        "SPAdes failed for large_sample; skipping this sample and continuing"
+        in message
+        for kind, message in calls
+        if kind == "log"
+    )
+    assert any(
+        "SPAdes finished with 1 failed sample(s): large_sample" in message
+        for kind, message in calls
+        if kind == "log"
+    )
+
+
 def test_stage7_rebuilds_existing_aggregate_outputs(monkeypatch, tmp_path):
     launcher = load_launcher()
     messages = []

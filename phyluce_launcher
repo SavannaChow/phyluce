@@ -1823,6 +1823,7 @@ def build_spades_command(sample, trimmed_root, assembly_root, spades_path, per_j
 
 def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, total_threads, per_job_threads, max_jobs, memory_gb, cov_cutoff, spades_tmp_root, cleanup_temp, fstrim_scratch, logger, log_root):
     jobs = concurrency_from_threads(total_threads, per_job_threads, max_jobs)
+    failed_samples = []
     sudo_keepalive = None
     if fstrim_scratch:
         if spades_tmp_root is None:
@@ -1839,27 +1840,47 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
     if jobs == 1:
         try:
             for sample in samples:
-                ran_spades = run_spades(
-                    sample,
-                    trimmed_root,
-                    assembly_root,
-                    spades_path,
-                    per_job_threads,
-                    memory_gb,
-                    cov_cutoff,
-                    spades_tmp_root,
-                    cleanup_temp,
-                    logger,
-                    log_root,
-                )
+                try:
+                    ran_spades = run_spades(
+                        sample,
+                        trimmed_root,
+                        assembly_root,
+                        spades_path,
+                        per_job_threads,
+                        memory_gb,
+                        cov_cutoff,
+                        spades_tmp_root,
+                        cleanup_temp,
+                        logger,
+                        log_root,
+                    )
+                except RuntimeError as exc:
+                    failed_samples.append(sample)
+                    logger.info(
+                        "SPAdes failed for {}; skipping this sample and continuing: {}".format(
+                            sample, exc
+                        )
+                    )
+                    continue
                 if fstrim_scratch and ran_spades:
                     run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root)
+            completed_samples = [
+                sample
+                for sample in samples
+                if (Path(assembly_root) / sample / "contigs.fasta").exists()
+            ]
             write_spades_summary_table(
-                samples,
+                completed_samples,
                 assembly_root,
                 logger,
                 write_sample_summaries=not cleanup_temp,
             )
+            if failed_samples:
+                logger.info(
+                    "SPAdes finished with {} failed sample(s): {}".format(
+                        len(failed_samples), ", ".join(failed_samples)
+                    )
+                )
             return
         finally:
             if sudo_keepalive is not None:
@@ -1867,7 +1888,7 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
     ran_any_spades = False
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-            futures = [
+            futures = {
                 executor.submit(
                     run_spades,
                     sample,
@@ -1881,22 +1902,42 @@ def run_spades_for_samples(samples, trimmed_root, assembly_root, spades_path, to
                     cleanup_temp,
                     logger,
                     log_root,
-                )
+                ): sample
                 for sample in samples
-            ]
+            }
             for future in concurrent.futures.as_completed(futures):
-                ran_any_spades = future.result() or ran_any_spades
+                sample = futures[future]
+                try:
+                    ran_any_spades = future.result() or ran_any_spades
+                except RuntimeError as exc:
+                    failed_samples.append(sample)
+                    logger.info(
+                        "SPAdes failed for {}; skipping this sample and continuing: {}".format(
+                            sample, exc
+                        )
+                    )
         if fstrim_scratch and ran_any_spades:
             run_fstrim_for_spades_scratch(spades_tmp_root, logger, log_root)
     finally:
         if sudo_keepalive is not None:
             stop_sudo_keepalive(sudo_keepalive[0], sudo_keepalive[1], logger)
+    completed_samples = [
+        sample
+        for sample in samples
+        if (Path(assembly_root) / sample / "contigs.fasta").exists()
+    ]
     write_spades_summary_table(
-        samples,
+        completed_samples,
         assembly_root,
         logger,
         write_sample_summaries=not cleanup_temp,
     )
+    if failed_samples:
+        logger.info(
+            "SPAdes finished with {} failed sample(s): {}".format(
+                len(failed_samples), ", ".join(sorted(failed_samples))
+            )
+        )
 
 
 def run_alignment_for_samples(samples, assembly_root, alignment_root, probes_path, minimap2_path, threads, logger, log_root):
